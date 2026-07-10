@@ -17,15 +17,23 @@ struct CodexProvider: UsageProvider {
     static let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
     func fetchUsage(account: Account, store: AccountStore) async throws -> UsageSnapshot {
-        guard var secrets = store.secrets(for: account.id) else {
+        guard let secrets = store.secrets(for: account.id) else {
             throw UsageBarError.invalidCredentials("저장된 토큰 없음")
         }
+        let (snapshot, updated) = try await probe(secrets: secrets)
+        if updated.accessToken != secrets.accessToken
+            || updated.refreshToken != secrets.refreshToken {
+            try store.updateSecrets(for: account.id, updated)
+        }
+        return snapshot
+    }
+
+    func probe(secrets: AccountSecrets) async throws -> (UsageSnapshot, AccountSecrets) {
         do {
-            return try await fetchOnce(secrets)
+            return (try await fetchOnce(secrets), secrets)
         } catch UsageBarError.tokenExpired {
-            secrets = try await Self.refresh(secrets: secrets)
-            try store.updateSecrets(for: account.id, secrets)
-            return try await fetchOnce(secrets)
+            let updated = try await Self.refresh(secrets: secrets)
+            return (try await fetchOnce(updated), updated)
         }
     }
 

@@ -27,6 +27,22 @@ struct ClaudeProvider: UsageProvider {
         return try Self.parseUsage(data)
     }
 
+    func probe(secrets: AccountSecrets) async throws -> (UsageSnapshot, AccountSecrets) {
+        guard let token = secrets.accessToken else {
+            throw UsageBarError.invalidCredentials("accessToken 없음")
+        }
+        let (code, data) = try await HTTP.request(Self.usageURL, headers: headers(token))
+        guard code == 200 else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            if code == 401 || code == 403 {
+                throw UsageBarError.invalidCredentials(
+                    "usage 엔드포인트 거부 (HTTP \(code)) — 이 토큰은 usage 조회 스코프가 없음. 응답: \(body.prefix(200))")
+            }
+            throw UsageBarError.http(code, body)
+        }
+        return (try Self.parseUsage(data), secrets)
+    }
+
     func resolveLabel(secrets: AccountSecrets) async throws -> String {
         guard let token = secrets.accessToken else {
             throw UsageBarError.invalidCredentials("accessToken 없음")

@@ -43,10 +43,19 @@ enum CLI {
                         print("토큰이 비어 있음"); return 1
                     }
                     let secrets = AccountSecrets(accessToken: token)
-                    let email = try await ClaudeProvider().resolveLabel(secrets: secrets)
-                    let account = Account(provider: .claude, kind: .storedToken, label: email)
+                    // usage 스코프 검증이 먼저 — setup-token은 profile 스코프가 없을 수 있음.
+                    _ = try await ClaudeProvider().probe(secrets: secrets)
+                    var label = value(of: "--label", in: args)
+                    if label == nil {
+                        label = try? await ClaudeProvider().resolveLabel(secrets: secrets)
+                    }
+                    if label == nil {
+                        print("usage 조회 성공. 프로필 권한이 없는 토큰이라 이메일 자동 조회 불가 — --label <이메일>로 다시 실행해줘")
+                        return 1
+                    }
+                    let account = Account(provider: .claude, kind: .storedToken, label: label!)
                     try store.add(account, secrets: secrets)
-                    print("추가됨: Claude \(email)")
+                    print("추가됨: Claude \(label!)")
                 }
                 return 0
             } catch {
@@ -119,6 +128,11 @@ enum CLI {
             print(usage)
             return 1
         }
+    }
+
+    private static func value(of flag: String, in args: [String]) -> String? {
+        guard let idx = args.firstIndex(of: flag), args.count > idx + 1 else { return nil }
+        return args[idx + 1]
     }
 
     private static func format(_ w: WindowUsage?) -> String {

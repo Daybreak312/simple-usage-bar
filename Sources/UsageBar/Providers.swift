@@ -6,7 +6,12 @@ protocol UsageProvider {
     /// Fetch current usage. May mutate stored secrets (token refresh).
     func fetchUsage(account: Account, store: AccountStore) async throws -> UsageSnapshot
     /// Validate secrets and resolve the account's email/label.
+    /// May fail on tokens without profile scope — callers should treat the
+    /// label as optional and fall back to user input.
     func resolveLabel(secrets: AccountSecrets) async throws -> String
+    /// Pre-save validation: hit the usage endpoint with the given secrets.
+    /// Returns the snapshot plus possibly-rotated secrets (Codex refresh).
+    func probe(secrets: AccountSecrets) async throws -> (UsageSnapshot, AccountSecrets)
 }
 
 enum HTTP {

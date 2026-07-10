@@ -1,17 +1,32 @@
 import SwiftUI
 
-// MARK: - Popover root
+// MARK: - Popover root (single window, in-place navigation)
 
+/// The MenuBarExtra popover closes whenever it loses key status, so any
+/// separate window (.sheet/.popover) fights it. All navigation happens
+/// in-place by swapping the popover's content.
 struct MenuView: View {
     @EnvironmentObject var poller: Poller
-    @State private var showAdd = false
+    @State private var adding = false
 
     var body: some View {
+        Group {
+            if adding {
+                AddAccountView(onDone: { adding = false })
+            } else {
+                accountList
+            }
+        }
+        .padding(12)
+        .frame(width: 480)
+    }
+
+    private var accountList: some View {
         VStack(alignment: .leading, spacing: 8) {
             if poller.states.isEmpty {
                 VStack(spacing: 6) {
                     Text("등록된 계정이 없어").font(.callout)
-                    Text("아래 ‘계정 추가’로 시작").font(.caption).foregroundStyle(.secondary)
+                    Text("아래 + 버튼으로 시작").font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
@@ -38,7 +53,7 @@ struct MenuView: View {
                 .help("지금 새로고침")
 
                 Button {
-                    showAdd = true
+                    adding = true
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -53,12 +68,6 @@ struct MenuView: View {
                 .buttonStyle(.borderless)
                 .help("종료")
             }
-        }
-        .padding(12)
-        .frame(width: 480)
-        .sheet(isPresented: $showAdd) {
-            AddAccountView()
-                .environmentObject(poller)
         }
     }
 }
@@ -183,20 +192,31 @@ struct UsageGauge: View {
     }
 }
 
-// MARK: - Add account
+// MARK: - Add account (inline, same window)
 
 struct AddAccountView: View {
     @EnvironmentObject var poller: Poller
-    @Environment(\.dismiss) private var dismiss
+    let onDone: () -> Void
 
     @State private var providerChoice: Provider = .claude
     @State private var pasted = ""
+    @State private var manualLabel = ""
     @State private var busy = false
     @State private var errorText: String?
+    @State private var infoText: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("계정 추가").font(.headline)
+            HStack {
+                Button {
+                    onDone()
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                Text("계정 추가").font(.headline)
+                Spacer()
+            }
 
             Picker("프로바이더", selection: $providerChoice) {
                 ForEach(Provider.allCases) { p in
@@ -210,7 +230,7 @@ struct AddAccountView: View {
                 if providerChoice == .claude {
                     Text("`claude setup-token`으로 발급한 sk-ant-oat01-… 토큰을 붙여넣어. 다른 계정은 시크릿 창에서 로그인해 발급하면 돼.")
                 } else {
-                    Text("그 계정으로 로그인된 ~/.codex/auth.json 내용 전체를 붙여넣어. 원본 머신에서 codex를 계속 쓸 거면, 임시 디렉토리에서 `CODEX_HOME=/tmp/cx codex login`으로 새 세션을 만들어 그걸 붙여넣을 것 (토큰 계보 충돌 방지).")
+                    Text("그 계정으로 로그인된 ~/.codex/auth.json 내용 전체를 붙여넣어. 원본 머신에서 codex를 계속 쓸 거면 `CODEX_HOME=/tmp/cx codex login`으로 새 세션을 만들어 그걸 쓸 것 (토큰 계보 충돌 방지).")
                 }
             }
             .font(.caption)
@@ -219,8 +239,12 @@ struct AddAccountView: View {
 
             TextEditor(text: $pasted)
                 .font(.system(size: 11, design: .monospaced))
-                .frame(height: providerChoice == .claude ? 54 : 120)
+                .frame(height: providerChoice == .claude ? 54 : 110)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(.quaternary))
+
+            TextField("라벨 (선택 — 이메일 자동 조회 실패 시 여기 입력한 값 사용)", text: $manualLabel)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
 
             if providerChoice == .claude {
                 Button("로컬 Claude Code 계정 자동 감지") {
@@ -230,14 +254,19 @@ struct AddAccountView: View {
                 .disabled(busy)
             }
 
+            if let infoText {
+                Text(infoText).font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let errorText {
                 Text(errorText).font(.caption).foregroundStyle(.red)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
                 Spacer()
-                Button("취소") { dismiss() }
+                Button("취소") { onDone() }
                 Button(busy ? "확인 중…" : "추가") {
                     Task { await add() }
                 }
@@ -245,16 +274,18 @@ struct AddAccountView: View {
                 .disabled(busy || pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(16)
-        .frame(width: 420)
     }
 
+    /// Validation order matters: usage first (the thing we actually need),
+    /// then profile only to prettify the label. setup-token tokens can lack
+    /// the profile scope while usage works fine.
     private func add() async {
         busy = true
         defer { busy = false }
         errorText = nil
+        infoText = nil
         do {
-            let secrets: AccountSecrets
+            var secrets: AccountSecrets
             switch providerChoice {
             case .claude:
                 secrets = AccountSecrets(
@@ -262,12 +293,26 @@ struct AddAccountView: View {
             case .codex:
                 secrets = try CodexProvider.secretsFromAuthJSON(pasted)
             }
-            let label = try await provider(for: providerChoice).resolveLabel(secrets: secrets)
+
+            let p = provider(for: providerChoice)
+            let (_, updatedSecrets) = try await p.probe(secrets: secrets)
+            secrets = updatedSecrets
+
+            var label = manualLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+            if label.isEmpty {
+                if let resolved = try? await p.resolveLabel(secrets: secrets) {
+                    label = resolved
+                } else {
+                    infoText = "usage 조회는 성공! 다만 이 토큰엔 프로필 권한이 없어서 이메일을 못 가져와 — 라벨을 직접 입력하고 다시 ‘추가’를 눌러줘."
+                    return
+                }
+            }
+
             let account = Account(provider: providerChoice, kind: .storedToken, label: label)
             try AccountStore.shared.add(account, secrets: secrets)
             poller.reloadAccounts()
+            onDone()
             await poller.refreshAll()
-            dismiss()
         } catch {
             errorText = error.localizedDescription
         }
@@ -277,15 +322,16 @@ struct AddAccountView: View {
         busy = true
         defer { busy = false }
         errorText = nil
+        infoText = nil
         do {
             let token = try ClaudeProvider.readLocalCLIToken()
-            let label = try await ClaudeProvider()
-                .resolveLabel(secrets: AccountSecrets(accessToken: token))
+            let label = (try? await ClaudeProvider()
+                .resolveLabel(secrets: AccountSecrets(accessToken: token))) ?? "로컬 Claude Code"
             let account = Account(provider: .claude, kind: .localClaudeCLI, label: "\(label) (로컬)")
             try AccountStore.shared.add(account, secrets: AccountSecrets())
             poller.reloadAccounts()
+            onDone()
             await poller.refreshAll()
-            dismiss()
         } catch {
             errorText = error.localizedDescription
         }
