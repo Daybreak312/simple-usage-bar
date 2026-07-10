@@ -48,13 +48,13 @@ final class SettingsStore {
 
 enum TUIFormat {
     static func gauge(_ title: String, _ w: WindowUsage?) -> String {
-        guard let w else { return "\(title) [----------]   —%" }
-        let filled = Int((min(w.percent, 100) / 10).rounded())
+        guard let w else { return "\(title) [-----]   —%" }
+        let filled = Int((min(w.percent, 100) / 20).rounded())
         let bar = String(repeating: "=", count: filled)
-            + String(repeating: "-", count: 10 - filled)
+            + String(repeating: "-", count: 5 - filled)
         var s = "\(title) [\(bar)] \(String(format: "%3d", Int(w.percent)))%"
         if let resets = w.resetsAt {
-            s += " (리셋 \(UsageGauge.countdown(to: resets)))"
+            s += " (\(UsageGauge.countdown(to: resets)))"
         }
         return s
     }
