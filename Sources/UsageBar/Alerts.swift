@@ -59,24 +59,55 @@ enum TUIFormat {
         return s
     }
 
-    static func line(_ state: AccountState) -> String {
-        let name = state.account.provider.displayName
-            .padding(toLength: 6, withPad: " ", startingAt: 0)
-        if let error = state.lastError {
-            return "\(name) | \(state.account.label) | 오류: \(error)"
-        }
-        guard let snap = state.snapshot else {
-            return "\(name) | \(state.account.label) | 데이터 없음"
-        }
-        var s = "\(name) | \(state.account.label) | \(gauge("5h", snap.fiveHour)) \(gauge("7d", snap.sevenDay))"
-        if !snap.details.isEmpty {
-            s += " | \(snap.details.joined(separator: ", "))"
-        }
-        return s
-    }
-
+    /// Column-aligned board: label and gauge columns are padded to the widest
+    /// row so the bars line up (padding is per character — CJK glyphs render
+    /// wider, exact alignment only holds for ASCII labels).
     static func board(_ states: [AccountState]) -> String {
-        states.map(line).joined(separator: "\n")
+        struct Row {
+            let name: String
+            let label: String
+            let five: String?
+            let seven: String?
+            let tail: String?
+        }
+        let rows: [Row] = states.map { state in
+            let name = state.account.provider.displayName
+                .padding(toLength: 6, withPad: " ", startingAt: 0)
+            if let error = state.lastError {
+                return Row(name: name, label: state.account.label,
+                           five: nil, seven: nil, tail: "오류: \(error)")
+            }
+            guard let snap = state.snapshot else {
+                return Row(name: name, label: state.account.label,
+                           five: nil, seven: nil, tail: "데이터 없음")
+            }
+            return Row(
+                name: name, label: state.account.label,
+                five: gauge("5h", snap.fiveHour),
+                seven: gauge("7d", snap.sevenDay),
+                tail: snap.details.isEmpty ? nil : snap.details.joined(separator: ", "))
+        }
+
+        let labelWidth = rows.map { $0.label.count }.max() ?? 0
+        let fiveWidth = rows.compactMap { $0.five?.count }.max() ?? 0
+        let sevenWidth = rows.compactMap { $0.seven?.count }.max() ?? 0
+
+        func pad(_ s: String, _ w: Int) -> String {
+            s.padding(toLength: max(w, s.count), withPad: " ", startingAt: 0)
+        }
+
+        return rows.map { r in
+            guard let five = r.five, let seven = r.seven else {
+                return "\(r.name) | \(pad(r.label, labelWidth)) | \(r.tail ?? "")"
+            }
+            var s = "\(r.name) | \(pad(r.label, labelWidth)) | \(pad(five, fiveWidth)) "
+            if let tail = r.tail {
+                s += "\(pad(seven, sevenWidth)) | \(tail)"
+            } else {
+                s += seven
+            }
+            return s
+        }.joined(separator: "\n")
     }
 }
 

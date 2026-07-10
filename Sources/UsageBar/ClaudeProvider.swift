@@ -101,7 +101,7 @@ struct ClaudeProvider: UsageProvider {
                    let model = scope["model"] as? [String: Any],
                    let name = model["display_name"] as? String,
                    let pct = limit["percent"] as? Double {
-                    details.append("\(name) 주간 \(Int(pct))%")
+                    details.append("\(name) \(Int(pct))%")
                 }
             }
         }
