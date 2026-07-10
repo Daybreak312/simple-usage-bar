@@ -20,16 +20,22 @@ scripts/make-app.sh --install   # /Applications/UsageBar.app 설치
 
 ## 계정 등록
 
-### Claude
+### Claude — 앱 내장 OAuth 로그인
 
-1. 아무 머신에서 `claude setup-token` 실행 → 브라우저에서 **해당 계정으로** 로그인·승인
-   (다른 계정은 시크릿 창 사용 — 이 맥에서 몇 개든 발급 가능)
-2. 출력된 `sk-ant-oat01-…` 장기 토큰을 팝오버의 "계정 추가"에 붙여넣기
+> ⚠️ `claude setup-token` 토큰은 **사용 불가** — usage/profile 엔드포인트가
+> `user:profile` 스코프를 요구하는데 setup-token엔 없음 (403, 2026-07-10 실측).
+> 그래서 앱이 Claude Code와 동일한 OAuth PKCE 플로우를 내장한다.
 
-이 맥에 로그인된 Claude Code 계정은 "로컬 Claude Code 계정 자동 감지" 버튼으로 토큰
-붙여넣기 없이 등록 가능 (Keychain을 읽기 전용으로 참조, 갱신은 Claude Code에 위임).
+1. 계정 추가 → Claude → "OAuth 로그인" → **브라우저에서 로그인 열기**
+   (다른 계정은 **URL 복사** 후 시크릿 창에 붙여넣어 그 계정으로 로그인)
+2. 승인하면 화면에 코드(`code#state`)가 뜸 → 앱에 붙여넣고 추가
 
-CLI로도 가능: `usagebar add-claude` (stdin 입력) / `usagebar add-claude --from-local-cli`
+액세스 토큰 만료 시 리프레시 토큰으로 자동 갱신 (회전 가정, 즉시 재저장).
+
+이 맥에 로그인된 Claude Code 계정은 "토큰 직접 입력" 탭의 "로컬 Claude Code 계정
+자동 감지"로 등록 가능 (Keychain 읽기 전용 참조, 갱신은 Claude Code에 위임).
+
+CLI: `usagebar add-claude --oauth` / `usagebar add-claude --from-local-cli`
 
 ### Codex
 
@@ -77,10 +83,12 @@ anthropic-beta: oauth-2025-04-20
 
 usage 응답: `five_hour`/`seven_day` `{utilization: 0-100, resets_at: ISO8601}`,
 `limits[]`에 모델 스코프 주간 한도 (`kind: weekly_scoped`, `scope.model.display_name`).
-profile 응답: `account.email`.
+profile 응답: `account.email`. **usage/profile 모두 `user:profile` 스코프 필수**
+(setup-token 토큰은 `user:inference`뿐이라 403 — 실측 확인).
 
-setup-token으로 발급한 토큰의 usage 엔드포인트 호환은 **첫 원격 계정 등록 때 확인 필요**
-(로컬 로그인 토큰으로는 검증 완료. 스코프 부족 시 플랜 B: 앱에 PKCE 로그인 내장).
+OAuth: authorize `https://claude.ai/oauth/authorize` (PKCE S256, client_id는
+Claude Code 공용), token `https://console.anthropic.com/v1/oauth/token`
+(authorization_code / refresh_token grant). 코드는 `code#state`로 붙여넣기 방식.
 
 ### Codex — 스펙은 codex-rs 소스 기준, 토큰 만료로 라이브 검증 대기
 

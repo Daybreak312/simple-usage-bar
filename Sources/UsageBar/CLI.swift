@@ -36,6 +36,25 @@ enum CLI {
                     let account = Account(provider: .claude, kind: .localClaudeCLI, label: "\(email) (로컬)")
                     try store.add(account, secrets: AccountSecrets())
                     print("추가됨: Claude \(account.label) [로컬 keychain 연동]")
+                } else if args.contains("--oauth") {
+                    let session = ClaudeOAuth.begin()
+                    print("아래 URL을 브라우저에서 열어 등록할 계정으로 승인 (다른 계정은 시크릿 창):")
+                    print(session.url.absoluteString)
+                    FileHandle.standardError.write(Data("\n승인 코드 (code#state): ".utf8))
+                    guard let code = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !code.isEmpty else {
+                        print("코드가 비어 있음"); return 1
+                    }
+                    let (initial, email) = try await ClaudeOAuth.exchange(pasted: code, session: session)
+                    let (_, secrets) = try await ClaudeProvider().probe(secrets: initial)
+                    var label = value(of: "--label", in: args) ?? email
+                    if label == nil {
+                        label = try? await ClaudeProvider().resolveLabel(secrets: secrets)
+                    }
+                    let account = Account(
+                        provider: .claude, kind: .storedToken, label: label ?? "claude")
+                    try store.add(account, secrets: secrets)
+                    print("추가됨: Claude \(account.label)")
                 } else {
                     FileHandle.standardError.write(Data("sk-ant-oat01-… 토큰 입력 후 엔터: ".utf8))
                     guard let token = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -153,7 +172,7 @@ enum CLI {
     GUI:  usagebar                (메뉴바 아이콘으로 실행)
     CLI:  usagebar check          현재 등록된 모든 계정의 사용량 출력
           usagebar list           계정 목록
-          usagebar add-claude [--from-local-cli]
+          usagebar add-claude [--oauth | --from-local-cli] [--label <이메일>]
           usagebar add-codex <auth.json | ->
           usagebar remove <uuid-prefix>
     """

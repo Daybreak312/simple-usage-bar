@@ -14,17 +14,30 @@ struct ClaudeProvider: UsageProvider {
     static let betaHeader = "oauth-2025-04-20"
 
     func fetchUsage(account: Account, store: AccountStore) async throws -> UsageSnapshot {
-        let token = try accessToken(for: account, store: store)
-        let (code, data) = try await HTTP.request(Self.usageURL, headers: headers(token))
-        guard code == 200 else {
-            if code == 401 {
-                throw account.kind == .localClaudeCLI
-                    ? UsageBarError.invalidCredentials("로컬 Claude Code 토큰 만료 — 그 계정으로 claude를 한 번 실행하면 갱신됨")
-                    : UsageBarError.tokenExpired
+        switch account.kind {
+        case .localClaudeCLI:
+            let token = try Self.readLocalCLIToken()
+            let (code, data) = try await HTTP.request(Self.usageURL, headers: headers(token))
+            guard code == 200 else {
+                if code == 401 {
+                    throw UsageBarError.invalidCredentials(
+                        "로컬 Claude Code 토큰 만료 — 그 계정으로 claude를 한 번 실행하면 갱신됨")
+                }
+                throw UsageBarError.http(code, String(data: data, encoding: .utf8) ?? "")
             }
-            throw UsageBarError.http(code, String(data: data, encoding: .utf8) ?? "")
+            return try Self.parseUsage(data)
+
+        case .storedToken:
+            guard let secrets = store.secrets(for: account.id) else {
+                throw UsageBarError.invalidCredentials("저장된 토큰 없음")
+            }
+            let (snapshot, updated) = try await probe(secrets: secrets)
+            if updated.accessToken != secrets.accessToken
+                || updated.refreshToken != secrets.refreshToken {
+                try store.updateSecrets(for: account.id, updated)
+            }
+            return snapshot
         }
-        return try Self.parseUsage(data)
     }
 
     func probe(secrets: AccountSecrets) async throws -> (UsageSnapshot, AccountSecrets) {
@@ -32,15 +45,26 @@ struct ClaudeProvider: UsageProvider {
             throw UsageBarError.invalidCredentials("accessToken 없음")
         }
         let (code, data) = try await HTTP.request(Self.usageURL, headers: headers(token))
-        guard code == 200 else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            if code == 401 || code == 403 {
-                throw UsageBarError.invalidCredentials(
-                    "usage 엔드포인트 거부 (HTTP \(code)) — 이 토큰은 usage 조회 스코프가 없음. 응답: \(body.prefix(200))")
-            }
-            throw UsageBarError.http(code, body)
+        if code == 200 {
+            return (try Self.parseUsage(data), secrets)
         }
-        return (try Self.parseUsage(data), secrets)
+        // Expired access token + refresh token on hand → refresh, persist, retry once.
+        if code == 401, secrets.refreshToken != nil {
+            let updated = try await ClaudeOAuth.refresh(secrets)
+            let (code2, data2) = try await HTTP.request(
+                Self.usageURL, headers: headers(updated.accessToken ?? ""))
+            guard code2 == 200 else {
+                throw UsageBarError.http(code2, String(data: data2, encoding: .utf8) ?? "")
+            }
+            return (try Self.parseUsage(data2), updated)
+        }
+        let body = String(data: data, encoding: .utf8) ?? ""
+        if code == 401 { throw UsageBarError.tokenExpired }
+        if code == 403 {
+            throw UsageBarError.invalidCredentials(
+                "usage 엔드포인트 거부 (403) — user:profile 스코프 없는 토큰 (setup-token은 불가, OAuth 로그인 사용). 응답: \(body.prefix(160))")
+        }
+        throw UsageBarError.http(code, body)
     }
 
     func resolveLabel(secrets: AccountSecrets) async throws -> String {
@@ -99,22 +123,10 @@ struct ClaudeProvider: UsageProvider {
         ]
     }
 
-    private func accessToken(for account: Account, store: AccountStore) throws -> String {
-        switch account.kind {
-        case .storedToken:
-            guard let token = store.secrets(for: account.id)?.accessToken else {
-                throw UsageBarError.invalidCredentials("저장된 토큰 없음")
-            }
-            return token
-        case .localClaudeCLI:
-            // Read the Claude Code CLI keychain item fresh on every poll.
-            // Read-only on purpose: refreshing it ourselves would race the CLI
-            // over the token lineage (see the Codex refresh_token_reused incident).
-            return try Self.readLocalCLIToken()
-        }
-    }
-
     /// Reads the local Claude Code credential via /usr/bin/security. The CLI
+    /// keychain item is read-only for us on purpose: refreshing it ourselves
+    /// would race Claude Code over the token lineage (see the Codex
+    /// refresh_token_reused incident). The CLI
     /// tool is Apple-signed, so this avoids per-build keychain ACL prompts an
     /// unsigned dev binary would trigger with a direct SecItemCopyMatching.
     static func readLocalCLIToken() throws -> String {

@@ -198,7 +198,16 @@ struct AddAccountView: View {
     @EnvironmentObject var poller: Poller
     let onDone: () -> Void
 
+    enum ClaudeMode: String, CaseIterable, Identifiable {
+        case oauth = "OAuth 로그인 (권장)"
+        case paste = "토큰 직접 입력"
+        var id: String { rawValue }
+    }
+
     @State private var providerChoice: Provider = .claude
+    @State private var claudeMode: ClaudeMode = .oauth
+    @State private var oauthSession: ClaudeOAuth.Session?
+    @State private var oauthCode = ""
     @State private var pasted = ""
     @State private var manualLabel = ""
     @State private var busy = false
@@ -226,27 +235,63 @@ struct AddAccountView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            Group {
-                if providerChoice == .claude {
-                    Text("`claude setup-token`으로 발급한 sk-ant-oat01-… 토큰을 붙여넣어. 다른 계정은 시크릿 창에서 로그인해 발급하면 돼.")
-                } else {
-                    Text("그 계정으로 로그인된 ~/.codex/auth.json 내용 전체를 붙여넣어. 원본 머신에서 codex를 계속 쓸 거면 `CODEX_HOME=/tmp/cx codex login`으로 새 세션을 만들어 그걸 쓸 것 (토큰 계보 충돌 방지).")
+            if providerChoice == .claude {
+                Picker("방식", selection: $claudeMode) {
+                    ForEach(ClaudeMode.allCases) { m in
+                        Text(m.rawValue).tag(m)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
 
-            TextEditor(text: $pasted)
-                .font(.system(size: 11, design: .monospaced))
-                .frame(height: providerChoice == .claude ? 54 : 110)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.quaternary))
+            if providerChoice == .claude && claudeMode == .oauth {
+                Text("1) 아래 버튼으로 로그인 페이지를 열고 **등록할 계정으로** 승인\n2) 다른 계정이면 ‘URL 복사’ 후 시크릿 창에 붙여넣어 진행\n3) 승인 후 화면에 뜨는 코드를 아래에 붙여넣기")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Button("브라우저에서 로그인 열기") {
+                        let session = ClaudeOAuth.begin()
+                        oauthSession = session
+                        NSWorkspace.shared.open(session.url)
+                    }
+                    Button("URL 복사") {
+                        let session = ClaudeOAuth.begin()
+                        oauthSession = session
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(session.url.absoluteString, forType: .string)
+                    }
+                }
+                .disabled(busy)
+
+                TextField("승인 코드 (code#state 형태)", text: $oauthCode)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+            } else {
+                Group {
+                    if providerChoice == .claude {
+                        Text("sk-ant-oat01-… 토큰 붙여넣기. 주의: setup-token 토큰은 usage 조회 스코프(user:profile)가 없어 등록 불가 — OAuth 로그인을 써줘. (로컬 감지는 이 맥의 Claude Code 로그인을 재사용)")
+                    } else {
+                        Text("그 계정으로 로그인된 ~/.codex/auth.json 내용 전체를 붙여넣어. 원본 머신에서 codex를 계속 쓸 거면 `CODEX_HOME=/tmp/cx codex login`으로 새 세션을 만들어 그걸 쓸 것 (토큰 계보 충돌 방지).")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                TextEditor(text: $pasted)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(height: providerChoice == .claude ? 54 : 110)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(.quaternary))
+            }
 
             TextField("라벨 (선택 — 이메일 자동 조회 실패 시 여기 입력한 값 사용)", text: $manualLabel)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 11))
 
-            if providerChoice == .claude {
+            if providerChoice == .claude && claudeMode == .paste {
                 Button("로컬 Claude Code 계정 자동 감지") {
                     Task { await addLocalClaude() }
                 }
@@ -271,14 +316,20 @@ struct AddAccountView: View {
                     Task { await add() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(busy || pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(busy || primaryInputEmpty)
             }
         }
     }
 
+    private var primaryInputEmpty: Bool {
+        if providerChoice == .claude && claudeMode == .oauth {
+            return oauthCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// Validation order matters: usage first (the thing we actually need),
-    /// then profile only to prettify the label. setup-token tokens can lack
-    /// the profile scope while usage works fine.
+    /// then profile only to prettify the label.
     private func add() async {
         busy = true
         defer { busy = false }
@@ -286,7 +337,15 @@ struct AddAccountView: View {
         infoText = nil
         do {
             var secrets: AccountSecrets
+            var oauthEmail: String?
             switch providerChoice {
+            case .claude where claudeMode == .oauth:
+                guard let session = oauthSession else {
+                    errorText = "먼저 ‘브라우저에서 로그인 열기’ 또는 ‘URL 복사’로 로그인을 시작해줘 (코드는 그 세션과 짝이어야 함)"
+                    return
+                }
+                (secrets, oauthEmail) = try await ClaudeOAuth.exchange(
+                    pasted: oauthCode, session: session)
             case .claude:
                 secrets = AccountSecrets(
                     accessToken: pasted.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -297,6 +356,7 @@ struct AddAccountView: View {
             let p = provider(for: providerChoice)
             let (_, updatedSecrets) = try await p.probe(secrets: secrets)
             secrets = updatedSecrets
+            if let oauthEmail, manualLabel.isEmpty { manualLabel = oauthEmail }
 
             var label = manualLabel.trimmingCharacters(in: .whitespacesAndNewlines)
             if label.isEmpty {
