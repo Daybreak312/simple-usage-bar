@@ -10,7 +10,7 @@ import Foundation
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-codex", "remove", "help", "--help"]
+        return ["check", "list", "add-claude", "add-codex", "remove", "update", "help", "--help"]
             .contains(args[1])
     }
 
@@ -118,6 +118,21 @@ enum CLI {
                 print("실패: \(error.localizedDescription)"); return 1
             }
 
+        case "update":
+            guard let repo = UpdateChecker.repoPath() else {
+                print("레포 경로를 못 찾음 — defaults write dev.daybreak.usagebar repoPath <경로>")
+                return 1
+            }
+            print("업데이트 실행 (로그: /tmp/usagebar-update.log)")
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = ["\(repo)/scripts/update.sh"]
+            try? proc.run()
+            proc.waitUntilExit()
+            let ok = proc.terminationStatus == 0
+            print(ok ? "완료 — 앱이 재시작됨" : "실패 — 로그 확인: tail /tmp/usagebar-update.log")
+            return ok ? 0 : 1
+
         case "check":
             let accounts = store.loadAccounts()
             guard !accounts.isEmpty else {
@@ -175,5 +190,6 @@ enum CLI {
           usagebar add-claude [--oauth | --from-local-cli] [--label <이메일>]
           usagebar add-codex <auth.json | ->
           usagebar remove <uuid-prefix>
+          usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
     """
 }

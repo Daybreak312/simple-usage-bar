@@ -7,6 +7,7 @@ import SwiftUI
 /// in-place by swapping the popover's content.
 struct MenuView: View {
     @EnvironmentObject var poller: Poller
+    @EnvironmentObject var updater: UpdateChecker
     @State private var adding = false
 
     var body: some View {
@@ -43,7 +44,29 @@ struct MenuView: View {
                     Text("갱신 \(last, style: .time)")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
+                if let commit = updater.currentCommit {
+                    Text(commit)
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .help("현재 버전 — 클릭하면 업데이트 확인")
+                        .onTapGesture { Task { await updater.check() } }
+                }
                 Spacer()
+
+                if updater.updating {
+                    Text("업데이트 중…")
+                        .font(.caption2).foregroundStyle(.orange)
+                } else if let next = updater.availableCommit {
+                    Button {
+                        updater.apply()
+                    } label: {
+                        Label("업데이트 (\(next))", systemImage: "arrow.down.circle.fill")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.orange)
+                    .help("git pull → 재빌드 → 재설치 → 자동 재시작")
+                }
+
                 Button {
                     Task { await poller.refreshAll() }
                 } label: {

@@ -26,11 +26,17 @@ struct UsageBarApp: App {
         p.start()
         return p
     }()
+    @StateObject private var updater: UpdateChecker = {
+        let u = UpdateChecker.shared
+        u.start()
+        return u
+    }()
 
     var body: some Scene {
         MenuBarExtra {
             MenuView()
                 .environmentObject(poller)
+                .environmentObject(updater)
         } label: {
             MenuBarLabel(poller: poller)
         }
