@@ -10,7 +10,7 @@ import Foundation
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-codex", "remove", "update", "help", "--help"]
+        return ["check", "list", "add-claude", "add-codex", "remove", "update", "webhook", "help", "--help"]
             .contains(args[1])
     }
 
@@ -134,29 +134,56 @@ enum CLI {
             return ok ? 0 : 1
 
         case "check":
-            let accounts = store.loadAccounts()
-            guard !accounts.isEmpty else {
+            let (board, failed) = await fetchBoard(store)
+            guard !board.isEmpty else {
                 print("등록된 계정 없음 — usagebar add-claude / add-codex 먼저")
                 return 1
             }
-            var failed = false
-            for account in accounts {
-                do {
-                    let snap = try await provider(for: account.provider)
-                        .fetchUsage(account: account, store: store)
-                    let fiveH = format(snap.fiveHour)
-                    let sevenD = format(snap.sevenDay)
-                    var line = "\(account.provider.displayName) | \(account.label) | 5h \(fiveH) 7d \(sevenD)"
-                    if !snap.details.isEmpty {
-                        line += " | \(snap.details.joined(separator: ", "))"
-                    }
-                    print(line)
-                } catch {
-                    failed = true
-                    print("\(account.provider.displayName) | \(account.label) | 오류: \(error.localizedDescription)")
-                }
-            }
+            print(TUIFormat.board(board))
             return failed ? 2 : 0
+
+        case "webhook":
+            guard args.count > 2 else {
+                print("usagebar webhook slack|discord <url> | clear | show | test")
+                return 1
+            }
+            var settings = SettingsStore.shared.load()
+            switch args[2] {
+            case "slack", "discord":
+                guard args.count > 3 else { print("URL 필요"); return 1 }
+                if args[2] == "slack" { settings.slackURL = args[3] }
+                else { settings.discordURL = args[3] }
+                do {
+                    try SettingsStore.shared.save(settings)
+                    print("저장됨 (\(args[2]))")
+                    return 0
+                } catch {
+                    print("저장 실패: \(error.localizedDescription)"); return 1
+                }
+            case "clear":
+                try? SettingsStore.shared.save(WebhookSettings())
+                print("웹훅 설정 비움")
+                return 0
+            case "show":
+                print("discord: \(mask(settings.discordURL))")
+                print("slack:   \(mask(settings.slackURL))")
+                return 0
+            case "test":
+                guard !settings.isEmpty else { print("웹훅 URL 미등록"); return 1 }
+                let (board, _) = await fetchBoard(store)
+                let results = await AlertSender.send(
+                    header: "[!] 웹훅 테스트 - UsageBar", states: board)
+                var ok = true
+                for (target, code) in results {
+                    let good = (200...299).contains(code)
+                    ok = ok && good
+                    print("\(target): \(good ? "전송 성공" : "실패 (HTTP \(code))")")
+                }
+                return ok ? 0 : 1
+            default:
+                print("usagebar webhook slack|discord <url> | clear | show | test")
+                return 1
+            }
 
         default:
             print(usage)
@@ -169,16 +196,26 @@ enum CLI {
         return args[idx + 1]
     }
 
-    private static func format(_ w: WindowUsage?) -> String {
-        guard let w else { return "[----------]  —%" }
-        let filled = Int((min(w.percent, 100) / 10).rounded())
-        let bar = String(repeating: "=", count: filled)
-            + String(repeating: "-", count: 10 - filled)
-        var s = "[\(bar)] \(String(format: "%3d", Int(w.percent)))%"
-        if let resets = w.resetsAt {
-            s += " (리셋 \(UsageGauge.countdown(to: resets)))"
+    private static func mask(_ url: String) -> String {
+        url.isEmpty ? "(없음)" : "\(url.prefix(45))…"
+    }
+
+    /// Fetch every account's usage into displayable states (CLI check / webhook test).
+    private static func fetchBoard(_ store: AccountStore) async -> ([AccountState], Bool) {
+        var board: [AccountState] = []
+        var failed = false
+        for account in store.loadAccounts() {
+            var state = AccountState(account: account)
+            do {
+                state.snapshot = try await provider(for: account.provider)
+                    .fetchUsage(account: account, store: store)
+            } catch {
+                state.lastError = error.localizedDescription
+                failed = true
+            }
+            board.append(state)
         }
-        return s
+        return (board, failed)
     }
 
     private static let usage = """
@@ -191,5 +228,6 @@ enum CLI {
           usagebar add-codex <auth.json | ->
           usagebar remove <uuid-prefix>
           usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
+          usagebar webhook slack|discord <url> | clear | show | test
     """
 }

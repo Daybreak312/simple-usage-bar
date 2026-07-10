@@ -16,6 +16,9 @@ final class Poller: ObservableObject {
 
     private let store = AccountStore.shared
     private var loopTask: Task<Void, Never>?
+    /// Last seen utilization per account, for threshold-crossing detection.
+    /// nil entry = no baseline yet (first poll after launch never alerts).
+    private var prevPercents: [UUID: (five: Double?, seven: Double?)] = [:]
 
     func start() {
         reloadAccounts()
@@ -68,6 +71,35 @@ final class Poller: ObservableObject {
             }
         }
         lastRefresh = Date()
+        fireThresholdAlerts()
+    }
+
+    /// Compare against the previous poll and push webhook alerts for every
+    /// 50/70/80/90% upward crossing. Window resets lower the baseline, so the
+    /// next climb re-alerts naturally.
+    private func fireThresholdAlerts() {
+        var headers: [String] = []
+        for state in states {
+            guard state.lastError == nil, let snap = state.snapshot else { continue }
+            let newFive = snap.fiveHour?.percent
+            let newSeven = snap.sevenDay?.percent
+            if let prev = prevPercents[state.account.id] {
+                if let t = AlertThresholds.crossed(old: prev.five, new: newFive) {
+                    headers.append("[!] 5h 사용량 \(Int(t))% - \(state.account.label)")
+                }
+                if let t = AlertThresholds.crossed(old: prev.seven, new: newSeven) {
+                    headers.append("[!] 7d 사용량 \(Int(t))% - \(state.account.label)")
+                }
+            }
+            prevPercents[state.account.id] = (newFive, newSeven)
+        }
+        guard !headers.isEmpty, !SettingsStore.shared.load().isEmpty else { return }
+        let board = states
+        Task.detached(priority: .utility) {
+            for header in headers {
+                _ = await AlertSender.send(header: header, states: board)
+            }
+        }
     }
 
     /// Menu bar summary: the worst (highest) utilization across all accounts.

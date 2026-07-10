@@ -6,16 +6,18 @@ import SwiftUI
 /// separate window (.sheet/.popover) fights it. All navigation happens
 /// in-place by swapping the popover's content.
 struct MenuView: View {
+    enum Screen { case list, add, settings }
+
     @EnvironmentObject var poller: Poller
     @EnvironmentObject var updater: UpdateChecker
-    @State private var adding = false
+    @State private var screen: Screen = .list
 
     var body: some View {
         Group {
-            if adding {
-                AddAccountView(onDone: { adding = false })
-            } else {
-                accountList
+            switch screen {
+            case .list: accountList
+            case .add: AddAccountView(onDone: { screen = .list })
+            case .settings: SettingsView(onDone: { screen = .list })
             }
         }
         .padding(12)
@@ -76,12 +78,20 @@ struct MenuView: View {
                 .help("지금 새로고침")
 
                 Button {
-                    adding = true
+                    screen = .add
                 } label: {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
                 .help("계정 추가")
+
+                Button {
+                    screen = .settings
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .buttonStyle(.borderless)
+                .help("웹훅 알림 설정")
 
                 Button {
                     NSApplication.shared.terminate(nil)
@@ -418,6 +428,96 @@ struct AddAccountView: View {
         } catch {
             errorText = error.localizedDescription
         }
+    }
+}
+
+// MARK: - Webhook settings (inline, same window)
+
+struct SettingsView: View {
+    @EnvironmentObject var poller: Poller
+    let onDone: () -> Void
+
+    @State private var discord = ""
+    @State private var slack = ""
+    @State private var status: String?
+    @State private var busy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Button {
+                    onDone()
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                Text("웹훅 알림 설정").font(.headline)
+                Spacer()
+            }
+
+            Text("매 조회(기본 10분)마다 각 계정의 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알럿을 보낸다. 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Discord 웹훅 URL (https://discord.com/api/webhooks/…)", text: $discord)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+
+            TextField("Slack 웹훅 URL (https://hooks.slack.com/services/…)", text: $slack)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+
+            if let status {
+                Text(status).font(.caption)
+                    .foregroundStyle(status.contains("실패") ? .red : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("테스트 전송") {
+                    Task { await test() }
+                }
+                .disabled(busy)
+                Button("저장") {
+                    save()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .onAppear {
+            let s = SettingsStore.shared.load()
+            discord = s.discordURL
+            slack = s.slackURL
+        }
+    }
+
+    private func save() {
+        do {
+            try SettingsStore.shared.save(WebhookSettings(
+                slackURL: slack.trimmingCharacters(in: .whitespacesAndNewlines),
+                discordURL: discord.trimmingCharacters(in: .whitespacesAndNewlines)))
+            status = "저장됨"
+        } catch {
+            status = "저장 실패: \(error.localizedDescription)"
+        }
+    }
+
+    private func test() async {
+        busy = true
+        defer { busy = false }
+        save()
+        guard !SettingsStore.shared.load().isEmpty else {
+            status = "웹훅 URL을 먼저 입력해줘"
+            return
+        }
+        let results = await AlertSender.send(
+            header: "[!] 웹훅 테스트 - UsageBar", states: poller.states)
+        status = results.map { target, code in
+            let ok = (200...299).contains(code)
+            return "\(target): \(ok ? "전송 성공" : "실패 (HTTP \(code))")"
+        }.joined(separator: " · ")
     }
 }
 
