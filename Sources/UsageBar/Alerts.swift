@@ -2,9 +2,12 @@ import Foundation
 
 // MARK: - Webhook settings
 
-struct WebhookSettings: Codable {
+struct AppSettings: Codable {
     var slackURL: String = ""
     var discordURL: String = ""
+    /// Account whose percent shows in the menu bar; nil = worst across all.
+    /// Optional so settings.json files from older versions still decode.
+    var menuBarAccountId: String?
 
     var isEmpty: Bool { slackURL.isEmpty && discordURL.isEmpty }
 }
@@ -25,15 +28,15 @@ final class SettingsStore {
         url = dir.appendingPathComponent("settings.json")
     }
 
-    func load() -> WebhookSettings {
+    func load() -> AppSettings {
         guard let data = try? Data(contentsOf: url),
-              let s = try? JSONDecoder().decode(WebhookSettings.self, from: data) else {
-            return WebhookSettings()
+              let s = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+            return AppSettings()
         }
         return s
     }
 
-    func save(_ settings: WebhookSettings) throws {
+    func save(_ settings: AppSettings) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(settings).write(to: url, options: .atomic)

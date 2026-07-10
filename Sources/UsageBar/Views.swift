@@ -127,9 +127,29 @@ struct AccountRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
+                if poller.pinnedAccountId == state.account.id {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .help("메뉴바에 이 계정 표시 중")
+                }
+
                 Spacer()
 
                 if hovering {
+                    Button {
+                        let isPinned = poller.pinnedAccountId == state.account.id
+                        poller.setPinned(isPinned ? nil : state.account.id)
+                    } label: {
+                        Image(systemName: poller.pinnedAccountId == state.account.id
+                            ? "pin.slash" : "pin")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .help(poller.pinnedAccountId == state.account.id
+                        ? "고정 해제 (메뉴바에 전체 최댓값 표시)"
+                        : "메뉴바에 이 계정 퍼센트 표시")
+
                     Button {
                         try? AccountStore.shared.remove(id: state.account.id)
                         poller.reloadAccounts()
@@ -495,7 +515,7 @@ struct SettingsView: View {
 
     private func save() {
         do {
-            try SettingsStore.shared.save(WebhookSettings(
+            try SettingsStore.shared.save(AppSettings(
                 slackURL: slack.trimmingCharacters(in: .whitespacesAndNewlines),
                 discordURL: discord.trimmingCharacters(in: .whitespacesAndNewlines)))
             status = "저장됨"
@@ -527,9 +547,9 @@ struct MenuBarLabel: View {
     @ObservedObject var poller: Poller
 
     var body: some View {
-        if let worst = poller.worstPercent {
-            Image(systemName: symbol(for: worst))
-            Text("\(Int(worst))%")
+        if let pct = poller.menuBarPercent {
+            Image(systemName: symbol(for: pct))
+            Text("\(Int(pct))%")
         } else {
             Image(systemName: "gauge.with.needle")
         }

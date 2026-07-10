@@ -20,8 +20,13 @@ final class Poller: ObservableObject {
     /// nil entry = no baseline yet (first poll after launch never alerts).
     private var prevPercents: [UUID: (five: Double?, seven: Double?)] = [:]
 
+    /// Account pinned to the menu bar label; nil = worst across all accounts.
+    @Published var pinnedAccountId: UUID?
+
     func start() {
         reloadAccounts()
+        pinnedAccountId = SettingsStore.shared.load().menuBarAccountId
+            .flatMap(UUID.init(uuidString:))
         loopTask?.cancel()
         loopTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -105,5 +110,23 @@ final class Poller: ObservableObject {
     /// Menu bar summary: the worst (highest) utilization across all accounts.
     var worstPercent: Double? {
         states.compactMap(\.maxPercent).max()
+    }
+
+    /// What the menu bar label shows: pinned account if set (and still
+    /// registered), otherwise the worst across all accounts.
+    var menuBarPercent: Double? {
+        if let pinned = pinnedAccountId,
+           let state = states.first(where: { $0.account.id == pinned }) {
+            return state.maxPercent
+        }
+        return worstPercent
+    }
+
+    /// Pin/unpin an account to the menu bar label (persisted).
+    func setPinned(_ id: UUID?) {
+        pinnedAccountId = id
+        var settings = SettingsStore.shared.load()
+        settings.menuBarAccountId = id?.uuidString
+        try? SettingsStore.shared.save(settings)
     }
 }

@@ -161,7 +161,7 @@ enum CLI {
                     print("저장 실패: \(error.localizedDescription)"); return 1
                 }
             case "clear":
-                try? SettingsStore.shared.save(WebhookSettings())
+                try? SettingsStore.shared.save(AppSettings())
                 print("웹훅 설정 비움")
                 return 0
             case "show":
