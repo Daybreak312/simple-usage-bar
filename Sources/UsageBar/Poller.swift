@@ -132,7 +132,7 @@ final class Poller: ObservableObject {
         case .seven: return v.seven.map { "\(Int($0))%" }
         case .both:
             if v.five == nil && v.seven == nil { return nil }
-            return "\(fmt(v.five))/\(fmt(v.seven))"
+            return "\(fmt(v.five)) \(fmt(v.seven))"
         }
     }
 
