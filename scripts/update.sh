@@ -1,14 +1,28 @@
 #!/bin/bash
 # Self-update: pull origin/main → rebuild → reinstall to /Applications → relaunch.
-# Designed to be launched detached from the running app (the app is killed and
-# reopened at the very end, so a failure anywhere leaves the old app running).
+# git pull이 실행 중인 이 스크립트 파일 자체를 덮어쓸 수 있으므로, 먼저 /tmp로
+# 복사해 그 사본을 실행한다 (스테이징). 실패 시 구동 중인 앱은 건드리지 않음.
 set -euo pipefail
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ "${USAGEBAR_UPDATE_STAGED:-}" != "1" ]]; then
+    REPO="$(cd "$(dirname "$0")/.." && pwd)"
+    cp "$0" /tmp/usagebar-update-staged.sh
+    USAGEBAR_UPDATE_STAGED=1 exec /bin/bash /tmp/usagebar-update-staged.sh "$REPO"
+fi
+
+REPO="${1:?repo path}"
 LOG=/tmp/usagebar-update.log
 exec >>"$LOG" 2>&1
 
+APP_BIN="/Applications/SimpleUsageBar.app/Contents/MacOS/SimpleUsageBar"
+
 notify() {
-    /usr/bin/osascript -e "display notification \"$1\" with title \"UsageBar\"" >/dev/null 2>&1 || true
+    # 앱 명의(아이콘 포함)로 네이티브 알림. 앱이 아직 없으면 osascript 폴백.
+    if [[ -x "$APP_BIN" ]]; then
+        "$APP_BIN" notify "SimpleUsageBar" "$1" || true
+    else
+        /usr/bin/osascript -e "display notification \"$1\" with title \"SimpleUsageBar\"" >/dev/null 2>&1 || true
+    fi
 }
 
 echo "=== update run $(date '+%F %T') repo=$REPO"
@@ -31,10 +45,11 @@ fi
 }
 
 # Swap to the freshly installed bundle. Old instances die here; failure before
-# this point never touches the running app.
-pkill -f 'UsageBar.app/Contents/MacOS/UsageBar' 2>/dev/null || true
+# this point never touches the running app. 패턴은 구명(UsageBar.app)도 포함.
+pkill -f 'UsageBar.app/Contents/MacOS' 2>/dev/null || true
 pkill -f '\.build/(debug|release)/usagebar$' 2>/dev/null || true
 sleep 1
-open /Applications/UsageBar.app
+open /Applications/SimpleUsageBar.app
+sleep 2
 notify "업데이트 완료 — $(git rev-parse --short HEAD)"
 echo "완료: $(git rev-parse --short HEAD)"

@@ -10,7 +10,7 @@ import Foundation
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-codex", "remove", "update", "webhook", "help", "--help"]
+        return ["check", "list", "add-claude", "add-codex", "remove", "update", "webhook", "notify", "help", "--help"]
             .contains(args[1])
     }
 
@@ -118,6 +118,15 @@ enum CLI {
                 print("실패: \(error.localizedDescription)"); return 1
             }
 
+        case "notify":
+            // update.sh 등 외부에서 앱 명의로 네이티브 알림을 쏘는 통로.
+            let title = args.count > 2 ? args[2] : "SimpleUsageBar"
+            let body = args.count > 3 ? args[3] : ""
+            LocalNotifier.send(title: title, body: body)
+            // UN 전달이 비동기라 프로세스가 바로 죽으면 유실됨 — 잠깐 대기.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            return 0
+
         case "update":
             guard let repo = UpdateChecker.repoPath() else {
                 print("레포 경로를 못 찾음 — defaults write dev.daybreak.usagebar repoPath <경로>")
@@ -172,7 +181,7 @@ enum CLI {
                 guard !settings.isEmpty else { print("웹훅 URL 미등록"); return 1 }
                 let (board, _) = await fetchBoard(store)
                 let results = await AlertSender.send(
-                    header: "[!] 웹훅 테스트 - UsageBar", states: board)
+                    header: "[!] 웹훅 테스트 - SimpleUsageBar", states: board)
                 var ok = true
                 for (target, code) in results {
                     let good = (200...299).contains(code)
@@ -219,7 +228,7 @@ enum CLI {
     }
 
     private static let usage = """
-    usagebar — Claude/Codex 사용량 메뉴바 앱
+    SimpleUsageBar — Claude/Codex 사용량 메뉴바 앱
 
     GUI:  usagebar                (메뉴바 아이콘으로 실행)
     CLI:  usagebar check          현재 등록된 모든 계정의 사용량 출력

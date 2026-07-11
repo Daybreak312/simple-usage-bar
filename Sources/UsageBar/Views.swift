@@ -562,7 +562,7 @@ struct SettingsView: View {
             return
         }
         let results = await AlertSender.send(
-            header: "[!] 웹훅 테스트 - UsageBar", states: poller.states)
+            header: "[!] 웹훅 테스트 - SimpleUsageBar", states: poller.states)
         status = results.map { target, code in
             let ok = (200...299).contains(code)
             return "\(target): \(ok ? "전송 성공" : "실패 (HTTP \(code))")"

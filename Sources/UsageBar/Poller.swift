@@ -113,23 +113,36 @@ final class Poller: ObservableObject {
     /// 50/70/80/90% upward crossing. Window resets lower the baseline, so the
     /// next climb re-alerts naturally.
     private func fireThresholdAlerts() {
-        var headers: [String] = []
+        var alerts: [(header: String, state: AccountState)] = []
         for state in states {
             guard state.lastError == nil, let snap = state.snapshot else { continue }
             let newFive = snap.fiveHour?.percent
             let newSeven = snap.sevenDay?.percent
             if let prev = prevPercents[state.account.id] {
                 if let t = AlertThresholds.crossed(old: prev.five, new: newFive) {
-                    headers.append("[!] 5h 사용량 \(Int(t))% - \(state.account.label)")
+                    alerts.append(("[!] 5h 사용량 \(Int(t))% - \(state.account.label)", state))
                 }
                 if let t = AlertThresholds.crossed(old: prev.seven, new: newSeven) {
-                    headers.append("[!] 7d 사용량 \(Int(t))% - \(state.account.label)")
+                    alerts.append(("[!] 7d 사용량 \(Int(t))% - \(state.account.label)", state))
                 }
             }
             prevPercents[state.account.id] = (newFive, newSeven)
         }
-        guard !headers.isEmpty, !SettingsStore.shared.load().isEmpty else { return }
+        guard !alerts.isEmpty else { return }
+
+        // Native notification: always, webhook과 동일 시점.
+        for (header, state) in alerts {
+            let summary = [
+                TUIFormat.gauge("5h", state.snapshot?.fiveHour),
+                TUIFormat.gauge("7d", state.snapshot?.sevenDay),
+            ].joined(separator: "  ")
+            LocalNotifier.send(title: header, body: summary)
+        }
+
+        // Webhook: only when configured.
+        guard !SettingsStore.shared.load().isEmpty else { return }
         let board = states
+        let headers = alerts.map(\.header)
         Task.detached(priority: .utility) {
             for header in headers {
                 _ = await AlertSender.send(header: header, states: board)

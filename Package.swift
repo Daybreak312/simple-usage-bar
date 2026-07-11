@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "UsageBar",
+    name: "SimpleUsageBar",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(

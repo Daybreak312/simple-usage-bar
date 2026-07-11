@@ -1,4 +1,4 @@
-# UsageBar
+# SimpleUsageBar
 
 Claude Code / Codex(ChatGPT 구독) 계정들의 5h/7d 사용량을 메뉴바에서 보여주는 macOS 앱.
 계정이 이 맥에서 사용 중일 필요 없음 — 10분마다 각 프로바이더의 usage API를 직접 폴링한다.
@@ -13,7 +13,7 @@ Codex  | example-two@gmail.com  5h [=---------] 12%  7d [===-------] 33%
 ```bash
 swift build                     # 개발 빌드
 .build/debug/usagebar           # GUI (메뉴바 아이콘)
-scripts/make-app.sh --install   # /Applications/UsageBar.app 설치
+scripts/make-app.sh --install   # /Applications/SimpleUsageBar.app 설치
 ```
 
 요구사항: macOS 14+, Command Line Tools (Xcode 불필요).
