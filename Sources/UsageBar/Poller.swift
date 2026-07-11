@@ -8,17 +8,28 @@ final class Poller: ObservableObject {
     @Published var states: [AccountState] = []
     @Published var lastRefresh: Date?
 
-    /// Poll interval in seconds (default 10 minutes).
-    var interval: TimeInterval {
+    /// Normal per-account poll interval (default 3 minutes).
+    var normalInterval: TimeInterval {
         let v = UserDefaults.standard.double(forKey: "pollIntervalSeconds")
-        return v >= 60 ? v : 600
+        return v >= 30 ? v : 180
     }
+
+    /// Accelerated interval once an account is running hot (default 1 minute).
+    var hotInterval: TimeInterval {
+        let v = UserDefaults.standard.double(forKey: "hotIntervalSeconds")
+        return v >= 15 ? v : 60
+    }
+
+    /// An account polls at hotInterval when max(5h, 7d) reaches this percent.
+    static let hotThreshold: Double = 80
 
     private let store = AccountStore.shared
     private var loopTask: Task<Void, Never>?
     /// Last seen utilization per account, for threshold-crossing detection.
     /// nil entry = no baseline yet (first poll after launch never alerts).
     private var prevPercents: [UUID: (five: Double?, seven: Double?)] = [:]
+    /// Per-account next poll time — each account runs its own cadence.
+    private var nextDue: [UUID: Date] = [:]
 
     /// Account pinned to the menu bar label; nil = worst across all accounts.
     @Published var pinnedAccountId: UUID?
@@ -32,10 +43,11 @@ final class Poller: ObservableObject {
         menuBarWindow = settings.menuBarWindow.flatMap(MenuBarWindow.init(rawValue:)) ?? .both
         loopTask?.cancel()
         loopTask = Task { [weak self] in
+            await self?.refreshAll()
+            // 15s tick; each account fires when its own due time passes.
             while !Task.isCancelled {
-                await self?.refreshAll()
-                let interval = self?.interval ?? 600
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                await self?.refreshDue()
             }
         }
     }
@@ -54,7 +66,19 @@ final class Poller: ObservableObject {
     }
 
     func refreshAll() async {
-        let snapshot = states
+        await refresh(states)
+    }
+
+    /// Refresh accounts whose individual due time has passed.
+    private func refreshDue() async {
+        let now = Date()
+        let due = states.filter { (nextDue[$0.account.id] ?? .distantPast) <= now }
+        guard !due.isEmpty else { return }
+        await refresh(due)
+    }
+
+    private func refresh(_ targets: [AccountState]) async {
+        let snapshot = targets
         await withTaskGroup(of: (UUID, Result<UsageSnapshot, Error>).self) { group in
             for state in snapshot {
                 group.addTask {
@@ -76,6 +100,9 @@ final class Poller: ObservableObject {
                 case .failure(let error):
                     states[idx].lastError = error.localizedDescription
                 }
+                // Hot accounts (≥80%) poll every minute, the rest every 3.
+                let hot = (states[idx].maxPercent ?? 0) >= Self.hotThreshold
+                nextDue[id] = Date().addingTimeInterval(hot ? hotInterval : normalInterval)
             }
         }
         lastRefresh = Date()

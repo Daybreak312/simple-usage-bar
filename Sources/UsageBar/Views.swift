@@ -494,7 +494,7 @@ struct SettingsView: View {
 
             Divider()
 
-            Text("매 조회(기본 10분)마다 각 계정의 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알럿을 보낸다. 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
+            Text("계정별로 3분마다 조회 (80% 이상이면 1분). 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알럿 — 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

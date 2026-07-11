@@ -65,7 +65,8 @@ rm -rf /tmp/cx
 
 - `~/Library/Application Support/UsageBar/accounts.json` — 계정 메타 (비밀 없음)
 - `~/Library/Application Support/UsageBar/secrets.json` — 토큰 (chmod 600, `~/.codex/auth.json`과 동일한 보안 수준)
-- 폴링 주기: `defaults write dev.daybreak.usagebar pollIntervalSeconds 300` (기본 600초)
+- 폴링: 계정별 독립 스케줄 — 기본 3분, 해당 계정 max(5h,7d) ≥ 80%면 1분.
+  오버라이드: `pollIntervalSeconds`(기본 180) / `hotIntervalSeconds`(기본 60) defaults 키
 
 Keychain 마이그레이션은 서명된 .app 배포 시점에 예정 (ad-hoc 빌드는 서명이 매번 바뀌어
 Keychain ACL 프롬프트가 빌드마다 뜨기 때문에 v0.1은 파일 저장 채택).
