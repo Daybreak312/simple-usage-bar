@@ -2,12 +2,27 @@ import Foundation
 
 // MARK: - Webhook settings
 
+/// Which usage window(s) the menu bar label shows.
+enum MenuBarWindow: String, Codable, CaseIterable {
+    case five, seven, both
+
+    var label: String {
+        switch self {
+        case .five: return "5h"
+        case .seven: return "7d"
+        case .both: return "둘 다"
+        }
+    }
+}
+
 struct AppSettings: Codable {
     var slackURL: String = ""
     var discordURL: String = ""
     /// Account whose percent shows in the menu bar; nil = worst across all.
     /// Optional so settings.json files from older versions still decode.
     var menuBarAccountId: String?
+    /// Raw MenuBarWindow value; optional for the same back-compat reason.
+    var menuBarWindow: String?
 
     var isEmpty: Bool { slackURL.isEmpty && discordURL.isEmpty }
 }

@@ -22,11 +22,14 @@ final class Poller: ObservableObject {
 
     /// Account pinned to the menu bar label; nil = worst across all accounts.
     @Published var pinnedAccountId: UUID?
+    /// Which window(s) the menu bar label shows.
+    @Published var menuBarWindow: MenuBarWindow = .both
 
     func start() {
         reloadAccounts()
-        pinnedAccountId = SettingsStore.shared.load().menuBarAccountId
-            .flatMap(UUID.init(uuidString:))
+        let settings = SettingsStore.shared.load()
+        pinnedAccountId = settings.menuBarAccountId.flatMap(UUID.init(uuidString:))
+        menuBarWindow = settings.menuBarWindow.flatMap(MenuBarWindow.init(rawValue:)) ?? .both
         loopTask?.cancel()
         loopTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -107,19 +110,40 @@ final class Poller: ObservableObject {
         }
     }
 
-    /// Menu bar summary: the worst (highest) utilization across all accounts.
-    var worstPercent: Double? {
-        states.compactMap(\.maxPercent).max()
-    }
-
-    /// What the menu bar label shows: pinned account if set (and still
-    /// registered), otherwise the worst across all accounts.
-    var menuBarPercent: Double? {
+    /// Per-window values for the menu bar: pinned account if set (and still
+    /// registered), otherwise the worst across all accounts per window.
+    private var displayValues: (five: Double?, seven: Double?) {
         if let pinned = pinnedAccountId,
            let state = states.first(where: { $0.account.id == pinned }) {
-            return state.maxPercent
+            return (state.snapshot?.fiveHour?.percent, state.snapshot?.sevenDay?.percent)
         }
-        return worstPercent
+        return (
+            states.compactMap { $0.snapshot?.fiveHour?.percent }.max(),
+            states.compactMap { $0.snapshot?.sevenDay?.percent }.max()
+        )
+    }
+
+    /// Menu bar label text per the configured window mode. "둘 다" is 5h/7d.
+    var menuBarText: String? {
+        func fmt(_ v: Double?) -> String { v.map { "\(Int($0))%" } ?? "—" }
+        let v = displayValues
+        switch menuBarWindow {
+        case .five: return v.five.map { "\(Int($0))%" }
+        case .seven: return v.seven.map { "\(Int($0))%" }
+        case .both:
+            if v.five == nil && v.seven == nil { return nil }
+            return "\(fmt(v.five))/\(fmt(v.seven))"
+        }
+    }
+
+    /// Severity driving the menu bar icon: worst of the displayed values.
+    var menuBarSeverity: Double? {
+        let v = displayValues
+        switch menuBarWindow {
+        case .five: return v.five
+        case .seven: return v.seven
+        case .both: return [v.five, v.seven].compactMap { $0 }.max()
+        }
     }
 
     /// Pin/unpin an account to the menu bar label (persisted).
@@ -127,6 +151,14 @@ final class Poller: ObservableObject {
         pinnedAccountId = id
         var settings = SettingsStore.shared.load()
         settings.menuBarAccountId = id?.uuidString
+        try? SettingsStore.shared.save(settings)
+    }
+
+    /// Choose which window(s) the menu bar shows (persisted).
+    func setMenuBarWindow(_ window: MenuBarWindow) {
+        menuBarWindow = window
+        var settings = SettingsStore.shared.load()
+        settings.menuBarWindow = window.rawValue
         try? SettingsStore.shared.save(settings)
     }
 }

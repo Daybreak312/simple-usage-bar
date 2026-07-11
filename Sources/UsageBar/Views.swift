@@ -475,6 +475,25 @@ struct SettingsView: View {
                 Spacer()
             }
 
+            HStack(spacing: 8) {
+                Text("메뉴바 표시").font(.caption)
+                Picker("", selection: Binding(
+                    get: { poller.menuBarWindow },
+                    set: { poller.setMenuBarWindow($0) }
+                )) {
+                    ForEach(MenuBarWindow.allCases, id: \.self) { w in
+                        Text(w.label).tag(w)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            Text("‘둘 다’는 5h/7d 순서로 표시. 계정 행의 핀으로 특정 계정만 볼 수도 있어 (핀 없으면 계정 전체 최댓값).")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
+            Divider()
+
             Text("매 조회(기본 10분)마다 각 계정의 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알럿을 보낸다. 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -547,9 +566,9 @@ struct MenuBarLabel: View {
     @ObservedObject var poller: Poller
 
     var body: some View {
-        if let pct = poller.menuBarPercent {
-            Image(systemName: symbol(for: pct))
-            Text("\(Int(pct))%")
+        if let text = poller.menuBarText {
+            Image(systemName: symbol(for: poller.menuBarSeverity ?? 0))
+            Text(text)
         } else {
             Image(systemName: "gauge.with.needle")
         }
