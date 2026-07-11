@@ -455,6 +455,7 @@ struct AddAccountView: View {
 
 struct SettingsView: View {
     @EnvironmentObject var poller: Poller
+    @EnvironmentObject var updater: UpdateChecker
     let onDone: () -> Void
 
     @State private var discord = ""
@@ -491,6 +492,15 @@ struct SettingsView: View {
             Text("‘둘 다’는 5h/7d 순서로 표시. 계정 행의 핀으로 특정 계정만 볼 수도 있어 (핀 없으면 계정 전체 최댓값).")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+
+            Toggle(isOn: Binding(
+                get: { updater.autoUpdate },
+                set: { updater.setAutoUpdate($0) }
+            )) {
+                Text("새 버전 자동 설치 (6시간마다 + 시작 시 확인)")
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
 
             Divider()
 

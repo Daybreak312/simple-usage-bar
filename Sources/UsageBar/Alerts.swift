@@ -23,6 +23,8 @@ struct AppSettings: Codable {
     var menuBarAccountId: String?
     /// Raw MenuBarWindow value; optional for the same back-compat reason.
     var menuBarWindow: String?
+    /// Auto-install updates when a new commit is detected. nil = true.
+    var autoUpdate: Bool?
 
     var isEmpty: Bool { slackURL.isEmpty && discordURL.isEmpty }
 }

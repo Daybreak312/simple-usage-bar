@@ -11,6 +11,7 @@ final class UpdateChecker: ObservableObject {
     @Published var currentCommit: String?
     @Published var availableCommit: String?
     @Published var updating = false
+    @Published var autoUpdate = true
 
     private var loopTask: Task<Void, Never>?
 
@@ -30,6 +31,7 @@ final class UpdateChecker: ObservableObject {
     }
 
     func start() {
+        autoUpdate = SettingsStore.shared.load().autoUpdate ?? true
         loopTask?.cancel()
         loopTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -37,6 +39,13 @@ final class UpdateChecker: ObservableObject {
                 try? await Task.sleep(nanoseconds: 6 * 3600 * 1_000_000_000)
             }
         }
+    }
+
+    func setAutoUpdate(_ on: Bool) {
+        autoUpdate = on
+        var settings = SettingsStore.shared.load()
+        settings.autoUpdate = on
+        try? SettingsStore.shared.save(settings)
     }
 
     func check() async {
@@ -52,6 +61,10 @@ final class UpdateChecker: ObservableObject {
         }.value
         currentCommit = result.0
         availableCommit = result.1
+        // Hands-free rollout: new commit detected → install & relaunch.
+        if availableCommit != nil, autoUpdate, !updating {
+            apply()
+        }
     }
 
     /// Fire the detached updater. The app keeps running until the script has
