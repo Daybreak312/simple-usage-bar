@@ -8,20 +8,11 @@ final class Poller: ObservableObject {
     @Published var states: [AccountState] = []
     @Published var lastRefresh: Date?
 
-    /// Normal per-account poll interval (default 3 minutes).
+    /// Per-account poll interval, flat regardless of utilization (default 3 minutes).
     var normalInterval: TimeInterval {
         let v = UserDefaults.standard.double(forKey: "pollIntervalSeconds")
         return v >= 30 ? v : 180
     }
-
-    /// Accelerated interval once an account is running hot (default 1 minute).
-    var hotInterval: TimeInterval {
-        let v = UserDefaults.standard.double(forKey: "hotIntervalSeconds")
-        return v >= 15 ? v : 60
-    }
-
-    /// An account polls at hotInterval when max(5h, 7d) reaches this percent.
-    static let hotThreshold: Double = 80
 
     private let store = AccountStore.shared
     private var loopTask: Task<Void, Never>?
@@ -109,9 +100,7 @@ final class Poller: ObservableObject {
                 case .failure(let error):
                     states[idx].lastError = error.localizedDescription
                 }
-                // Hot accounts (≥80%) poll every minute, the rest every 3.
-                let hot = (states[idx].maxPercent ?? 0) >= Self.hotThreshold
-                nextDue[id] = Date().addingTimeInterval(hot ? hotInterval : normalInterval)
+                nextDue[id] = Date().addingTimeInterval(normalInterval)
             }
         }
         lastRefresh = Date()

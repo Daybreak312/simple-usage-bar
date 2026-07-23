@@ -1,7 +1,7 @@
 # SimpleUsageBar
 
 Claude Code / Codex(ChatGPT 구독) 계정들의 5h/7d 사용량을 메뉴바에서 보여주는 macOS 앱.
-계정이 이 맥에서 사용 중일 필요 없음 — 10분마다 각 프로바이더의 usage API를 직접 폴링한다.
+계정이 이 맥에서 사용 중일 필요 없음 — 3분마다 각 프로바이더의 usage API를 직접 폴링한다.
 
 ```
 Claude | example-one@gmail.com  5h [====------] 43%  7d [==--------] 21%
@@ -68,8 +68,8 @@ rm -rf /tmp/cx
 
 - `~/Library/Application Support/UsageBar/accounts.json` — 계정 메타 (비밀 없음)
 - `~/Library/Application Support/UsageBar/secrets.json` — 토큰 (chmod 600, `~/.codex/auth.json`과 동일한 보안 수준)
-- 폴링: 계정별 독립 스케줄 — 기본 3분, 해당 계정 max(5h,7d) ≥ 80%면 1분.
-  오버라이드: `pollIntervalSeconds`(기본 180) / `hotIntervalSeconds`(기본 60) defaults 키
+- 폴링: 계정별 독립 스케줄 — 사용량과 무관하게 평탄한 3분 주기.
+  오버라이드: `pollIntervalSeconds`(기본 180) defaults 키
 
 Keychain 마이그레이션은 서명된 .app 배포 시점에 예정 (ad-hoc 빌드는 서명이 매번 바뀌어
 Keychain ACL 프롬프트가 빌드마다 뜨기 때문에 v0.1은 파일 저장 채택).
