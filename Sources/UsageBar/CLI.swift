@@ -216,8 +216,14 @@ enum CLI {
         for account in store.loadAccounts() {
             var state = AccountState(account: account)
             do {
-                state.snapshot = try await provider(for: account.provider)
+                let snapshot = try await provider(for: account.provider)
                     .fetchUsage(account: account, store: store)
+                state.snapshot = snapshot
+                // Display the identity seen on this fetch; persisting it is
+                // the GUI poller's job (single writer for accounts.json).
+                if let resolved = snapshot.resolvedLabel {
+                    state.account.label = resolved
+                }
             } catch {
                 state.lastError = error.localizedDescription
                 failed = true

@@ -97,6 +97,15 @@ final class Poller: ObservableObject {
                 case .success(let usage):
                     states[idx].snapshot = usage
                     states[idx].lastError = nil
+                    // Follow the identity seen on this fetch (local-CLI login
+                    // can switch accounts anytime). Re-baseline alerts so the
+                    // switch itself never reads as a threshold crossing.
+                    if let resolved = usage.resolvedLabel,
+                       resolved != states[idx].account.label {
+                        states[idx].account.label = resolved
+                        try? store.updateLabel(for: id, resolved)
+                        prevPercents[id] = nil
+                    }
                 case .failure(let error):
                     states[idx].lastError = error.localizedDescription
                 }

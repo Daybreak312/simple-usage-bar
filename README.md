@@ -34,6 +34,9 @@ scripts/make-app.sh --install   # /Applications/SimpleUsageBar.app 설치
 
 이 맥에 로그인된 Claude Code 계정은 "토큰 직접 입력" 탭의 "로컬 Claude Code 계정
 자동 감지"로 등록 가능 (Keychain 읽기 전용 참조, 갱신은 Claude Code에 위임).
+Claude Code에서 다른 계정으로 로그인을 바꾸면 다음 폴링에서 라벨(이메일)이 자동으로
+따라온다 — 토큰이 바뀐 폴링에서만 프로필을 재조회하고, 교체 시점에는 알럿 기준선을
+리셋해 계정 전환이 임계 돌파 알럿으로 오인되지 않는다.
 
 CLI: `usagebar add-claude --oauth` / `usagebar add-claude --from-local-cli`
 

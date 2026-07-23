@@ -45,6 +45,18 @@ final class AccountStore {
         }
     }
 
+    /// Update a persisted account's display label — the local-CLI row follows
+    /// whatever account Claude Code is currently logged into.
+    func updateLabel(for id: UUID, _ label: String) throws {
+        try queue.sync {
+            var accounts = (try? Data(contentsOf: accountsURL))
+                .flatMap { try? Self.decoder.decode([Account].self, from: $0) } ?? []
+            guard let idx = accounts.firstIndex(where: { $0.id == id }) else { return }
+            accounts[idx].label = label
+            try write(accounts, to: accountsURL)
+        }
+    }
+
     func remove(id: UUID) throws {
         try queue.sync {
             var accounts = (try? Data(contentsOf: accountsURL))

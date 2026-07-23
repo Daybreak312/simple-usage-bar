@@ -60,6 +60,10 @@ struct UsageSnapshot: Equatable {
     /// Short extra facts, e.g. model-scoped weekly limits or plan/credits.
     var details: [String] = []
     var fetchedAt: Date
+    /// Identity the provider observed during this fetch, when it can know it
+    /// (local-CLI accounts: the login can switch to another account between
+    /// polls). nil = no identity info; keep the stored label.
+    var resolvedLabel: String?
 }
 
 /// One row of state as shown in the UI.

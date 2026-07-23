@@ -25,7 +25,15 @@ struct ClaudeProvider: UsageProvider {
                 }
                 throw UsageBarError.http(code, String(data: data, encoding: .utf8) ?? "")
             }
-            return try Self.parseUsage(data)
+            var snapshot = try Self.parseUsage(data)
+            // The local login can switch to another account between polls.
+            // Resolve the identity behind the token we just used so the row
+            // label follows; the cache only hits the profile endpoint when
+            // the token actually changed.
+            if let email = await LocalIdentityCache.shared.email(for: token) {
+                snapshot.resolvedLabel = "\(email) (로컬)"
+            }
+            return snapshot
 
         case .storedToken:
             guard let secrets = store.secrets(for: account.id) else {
@@ -129,6 +137,25 @@ struct ClaudeProvider: UsageProvider {
     /// refresh_token_reused incident). The CLI
     /// tool is Apple-signed, so this avoids per-build keychain ACL prompts an
     /// unsigned dev binary would trigger with a direct SecItemCopyMatching.
+    /// Email lookup for the local-CLI account, keyed by the exact token in
+    /// use. Steady state costs zero extra requests; a token change (login
+    /// switch or Claude Code's own refresh) triggers one profile call. A
+    /// failed lookup is not cached, so it retries on the next poll.
+    actor LocalIdentityCache {
+        static let shared = LocalIdentityCache()
+        private var token: String?
+        private var email: String?
+
+        func email(for current: String) async -> String? {
+            if current == token, let email { return email }
+            guard let resolved = try? await ClaudeProvider()
+                .resolveLabel(secrets: AccountSecrets(accessToken: current)) else { return nil }
+            token = current
+            email = resolved
+            return resolved
+        }
+    }
+
     static func readLocalCLIToken() throws -> String {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
