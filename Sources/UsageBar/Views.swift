@@ -562,7 +562,7 @@ struct SettingsView: View {
                 get: { updater.autoUpdate },
                 set: { updater.setAutoUpdate($0) }
             )) {
-                Text("새 버전 자동 설치 (6시간마다 + 시작 시 확인)")
+                Text("새 버전 자동 설치 (1시간마다 + 시작 시 확인)")
                     .font(.caption)
             }
             .toggleStyle(.checkbox)

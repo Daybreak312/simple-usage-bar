@@ -37,7 +37,10 @@ final class UpdateChecker: ObservableObject {
         loopTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.check()
-                try? await Task.sleep(nanoseconds: 6 * 3600 * 1_000_000_000)
+                // Hourly: a fetch is cheap, and it doubles as the retry path
+                // after a failed update (watchdog unsticks `updating`, the
+                // next tick re-applies).
+                try? await Task.sleep(nanoseconds: 3600 * 1_000_000_000)
             }
         }
     }
