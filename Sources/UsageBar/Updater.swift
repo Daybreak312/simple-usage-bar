@@ -14,6 +14,7 @@ final class UpdateChecker: ObservableObject {
     @Published var autoUpdate = true
 
     private var loopTask: Task<Void, Never>?
+    private var watchdog: Task<Void, Never>?
 
     /// Repo root: UserDefaults override first, else derived from the compiled
     /// source path (works as long as the checkout isn't moved).
@@ -77,6 +78,16 @@ final class UpdateChecker: ObservableObject {
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
         proc.arguments = ["-c", "nohup '\(script)' >/dev/null 2>&1 &"]
         try? proc.run()
+        // Success means the script kills this instance before the deadline —
+        // still being alive past it means the script died somewhere (offline
+        // fetch, pull conflict, build error). Unstick the UI and re-arm so
+        // the next 6h check can retry instead of blocking on `updating`.
+        watchdog?.cancel()
+        watchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.updating = false
+        }
     }
 
     nonisolated private static func git(_ repo: String, _ args: [String]) -> String? {

@@ -2,7 +2,7 @@
 # Self-update: pull origin/main → rebuild → reinstall to /Applications → relaunch.
 # git pull이 실행 중인 이 스크립트 파일 자체를 덮어쓸 수 있으므로, 먼저 /tmp로
 # 복사해 그 사본을 실행한다 (스테이징). 실패 시 구동 중인 앱은 건드리지 않음.
-set -euo pipefail
+set -Eeuo pipefail
 
 if [[ "${USAGEBAR_UPDATE_STAGED:-}" != "1" ]]; then
     REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,10 +25,16 @@ notify() {
     fi
 }
 
+# set -e로 조용히 죽는 단계(오프라인 fetch 등)도 반드시 알림을 남긴다 —
+# 무음 실패는 앱을 "업데이트 중…"에 가둬놓는 원인이었다. || 핸들러가 있는
+# 단계는 ERR 트랩을 타지 않으므로 개별 메시지가 그대로 우선한다.
+trap 'CMD=$BASH_COMMAND; echo "ERR: $CMD"; notify "업데이트 실패: $CMD (로그: /tmp/usagebar-update.log)"' ERR
+
 echo "=== update run $(date '+%F %T') repo=$REPO"
 cd "$REPO"
 
 git fetch --quiet origin main
+PREV_HEAD="$(git rev-parse HEAD)"
 if git merge-base --is-ancestor origin/main HEAD; then
     echo "이미 최신 (HEAD $(git rev-parse --short HEAD))"
 else
@@ -40,7 +46,11 @@ else
 fi
 
 ./scripts/make-app.sh --install || {
+    # pull만 앞서가면 다음 확인에서 "이미 최신"으로 보여 영영 재시도하지
+    # 않는다 — 되돌려서 "업데이트 있음" 상태를 유지해 다음 주기에 재시도.
+    git reset --hard "$PREV_HEAD" >/dev/null 2>&1 || true
     notify "업데이트 실패: 빌드 오류 (로그: $LOG)"
+    echo "빌드 실패 — $PREV_HEAD 로 롤백"
     exit 1
 }
 
