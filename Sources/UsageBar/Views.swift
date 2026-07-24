@@ -111,6 +111,8 @@ struct AccountRow: View {
     let state: AccountState
     @EnvironmentObject var poller: Poller
     @State private var hovering = false
+    @State private var confirmingSwitch = false
+    @State private var switching = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -136,7 +138,37 @@ struct AccountRow: View {
 
                 Spacer()
 
+                if switching {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("전환 중…")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+
                 if hovering {
+                    if canSwitchTo {
+                        Button {
+                            if confirmingSwitch {
+                                Task { await switchToThis() }
+                            } else {
+                                confirmingSwitch = true
+                            }
+                        } label: {
+                            if confirmingSwitch {
+                                Label("한 번 더 누르면 전환", systemImage: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 10))
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 10))
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(confirmingSwitch ? .orange : .secondary)
+                        .disabled(switching)
+                        .help("이 계정으로 Claude Code 로그인 전환 (자동 롤링이 켜져 있으면 한도 임박 시 다시 교체될 수 있음)")
+                    }
+
                     Button {
                         let isPinned = poller.pinnedAccountId == state.account.id
                         poller.setPinned(isPinned ? nil : state.account.id)
@@ -184,7 +216,39 @@ struct AccountRow: View {
             }
         }
         .padding(.vertical, 4)
-        .onHover { hovering = $0 }
+        .onHover {
+            hovering = $0
+            if !$0 { confirmingSwitch = false }
+        }
+    }
+
+    /// 전환 버튼 노출 조건: Claude 저장 계정 + 로컬 행(전환 추적 주체) 존재.
+    /// 섀도잉 덕에 화면에 보이는 저장 행은 곧 "현재 비활성" 계정이다.
+    private var canSwitchTo: Bool {
+        state.account.provider == .claude
+            && state.account.kind == .storedToken
+            && poller.states.contains {
+                $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
+            }
+    }
+
+    private func switchToThis() async {
+        switching = true
+        confirmingSwitch = false
+        defer { switching = false }
+        let local = poller.states.first {
+            $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
+        }
+        do {
+            try await RollingEngine.roll(
+                to: state.account, states: poller.visibleStates,
+                store: AccountStore.shared,
+                reason: "수동 전환", from: local?.account.email)
+            poller.reloadAccounts()
+            await poller.refreshAll()
+        } catch {
+            LocalNotifier.send(title: "[!] 계정 전환 실패", body: error.localizedDescription)
+        }
     }
 
     private var badgeColor: Color {
