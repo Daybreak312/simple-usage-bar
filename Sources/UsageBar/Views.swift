@@ -28,8 +28,8 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 8) {
             if poller.states.isEmpty {
                 VStack(spacing: 6) {
-                    Text("등록된 계정이 없어").font(.callout)
-                    Text("아래 + 버튼으로 시작").font(.caption).foregroundStyle(.secondary)
+                    Text("등록된 계정이 없습니다").font(.callout)
+                    Text("아래 + 버튼으로 시작해 주세요").font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
@@ -299,7 +299,7 @@ struct AddAccountView: View {
             }
 
             if providerChoice == .claude && claudeMode == .oauth {
-                Text("1) 아래 버튼으로 로그인 페이지를 열고 **등록할 계정으로** 승인\n2) 다른 계정이면 ‘URL 복사’ 후 시크릿 창에 붙여넣어 진행\n3) 승인 후 화면에 뜨는 코드를 아래에 붙여넣기")
+                Text("1) 아래 버튼으로 로그인 페이지를 열고 **등록할 계정으로** 승인해 주세요\n2) 다른 계정이면 ‘URL 복사’ 후 시크릿 창에서 진행해 주세요\n3) 승인 후 화면에 뜨는 코드를 아래에 붙여넣어 주세요")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -325,9 +325,9 @@ struct AddAccountView: View {
             } else {
                 Group {
                     if providerChoice == .claude {
-                        Text("sk-ant-oat01-… 토큰 붙여넣기. 주의: setup-token 토큰은 usage 조회 스코프(user:profile)가 없어 등록 불가 — OAuth 로그인을 써줘. (로컬 감지는 이 맥의 Claude Code 로그인을 재사용)")
+                        Text("sk-ant-oat01-… 토큰을 붙여넣어 주세요. 주의: setup-token 토큰은 usage 조회 스코프(user:profile)가 없어 등록되지 않습니다 — OAuth 로그인을 사용해 주세요. (로컬 감지는 이 맥의 Claude Code 로그인을 재사용합니다)")
                     } else {
-                        Text("그 계정으로 로그인된 ~/.codex/auth.json 내용 전체를 붙여넣어. 원본 머신에서 codex를 계속 쓸 거면 `CODEX_HOME=/tmp/cx codex login`으로 새 세션을 만들어 그걸 쓸 것 (토큰 계보 충돌 방지).")
+                        Text("그 계정으로 로그인된 ~/.codex/auth.json 내용 전체를 붙여넣어 주세요. 원본 머신에서 codex를 계속 쓰려면 `CODEX_HOME=/tmp/cx codex login`으로 만든 새 세션을 사용해 주세요 (토큰 계보 충돌 방지).")
                     }
                 }
                 .font(.caption)
@@ -394,7 +394,7 @@ struct AddAccountView: View {
             switch providerChoice {
             case .claude where claudeMode == .oauth:
                 guard let session = oauthSession else {
-                    errorText = "먼저 ‘브라우저에서 로그인 열기’ 또는 ‘URL 복사’로 로그인을 시작해줘 (코드는 그 세션과 짝이어야 함)"
+                    errorText = "먼저 ‘브라우저에서 로그인 열기’ 또는 ‘URL 복사’로 로그인을 시작해 주세요 (코드는 그 세션과 짝이어야 합니다)"
                     return
                 }
                 (secrets, oauthEmail) = try await ClaudeOAuth.exchange(
@@ -416,7 +416,7 @@ struct AddAccountView: View {
                 if let resolved = try? await p.resolveLabel(secrets: secrets) {
                     label = resolved
                 } else {
-                    infoText = "usage 조회는 성공! 다만 이 토큰엔 프로필 권한이 없어서 이메일을 못 가져와 — 라벨을 직접 입력하고 다시 ‘추가’를 눌러줘."
+                    infoText = "usage 조회는 성공했습니다. 다만 이 토큰엔 프로필 권한이 없어 이메일을 가져오지 못했습니다 — 라벨을 직접 입력하고 다시 ‘추가’를 눌러 주세요."
                     return
                 }
             }
@@ -490,7 +490,7 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
-            Text("‘둘 다’는 5h/7d 순서로 표시. 계정 행의 핀으로 특정 계정만 볼 수도 있어 (핀 없으면 계정 전체 최댓값).")
+            Text("‘둘 다’는 5h/7d 순서로 표시합니다. 계정 행의 핀으로 특정 계정만 볼 수도 있습니다 (핀이 없으면 계정 전체 최댓값).")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
 
@@ -523,7 +523,7 @@ struct SettingsView: View {
 
             Divider()
 
-            Text("계정별로 3분마다 조회. 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알럿 — 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
+            Text("계정별로 3분마다 조회합니다. 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알림을 보냅니다 — 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -581,7 +581,7 @@ struct SettingsView: View {
         defer { busy = false }
         save()
         guard !SettingsStore.shared.load().isEmpty else {
-            status = "웹훅 URL을 먼저 입력해줘"
+            status = "웹훅 URL을 먼저 입력해 주세요"
             return
         }
         let results = await AlertSender.send(

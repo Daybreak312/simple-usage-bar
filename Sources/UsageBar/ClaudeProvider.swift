@@ -21,7 +21,7 @@ struct ClaudeProvider: UsageProvider {
             guard code == 200 else {
                 if code == 401 {
                     throw UsageBarError.invalidCredentials(
-                        "로컬 Claude Code 토큰 만료 — 그 계정으로 claude를 한 번 실행하면 갱신됨")
+                        "로컬 Claude Code 토큰 만료 — 그 계정으로 claude를 한 번 실행하면 갱신됩니다")
                 }
                 throw UsageBarError.http(code, String(data: data, encoding: .utf8) ?? "")
             }

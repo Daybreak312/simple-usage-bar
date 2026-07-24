@@ -38,7 +38,7 @@ enum CLI {
                     print("추가됨: Claude \(account.label) [로컬 keychain 연동]")
                 } else if args.contains("--oauth") {
                     let session = ClaudeOAuth.begin()
-                    print("아래 URL을 브라우저에서 열어 등록할 계정으로 승인 (다른 계정은 시크릿 창):")
+                    print("아래 URL을 브라우저에서 열어 등록할 계정으로 승인해 주세요 (다른 계정은 시크릿 창):")
                     print(session.url.absoluteString)
                     FileHandle.standardError.write(Data("\n승인 코드 (code#state): ".utf8))
                     guard let code = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -69,7 +69,7 @@ enum CLI {
                         label = try? await ClaudeProvider().resolveLabel(secrets: secrets)
                     }
                     if label == nil {
-                        print("usage 조회 성공. 프로필 권한이 없는 토큰이라 이메일 자동 조회 불가 — --label <이메일>로 다시 실행해줘")
+                        print("usage 조회 성공. 프로필 권한이 없는 토큰이라 이메일 자동 조회 불가 — --label <이메일>로 다시 실행해 주세요")
                         return 1
                     }
                     let account = Account(provider: .claude, kind: .storedToken, label: label!)
@@ -145,7 +145,7 @@ enum CLI {
         case "check":
             let (board, failed) = await fetchBoard(store)
             guard !board.isEmpty else {
-                print("등록된 계정 없음 — usagebar add-claude / add-codex 먼저")
+                print("등록된 계정 없음 — usagebar add-claude / add-codex로 먼저 등록해 주세요")
                 return 1
             }
             print(TUIFormat.board(visible(board)))
@@ -159,7 +159,7 @@ enum CLI {
             guard let local = board.first(where: {
                 $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
             }) else {
-                print("로컬 Claude Code 계정 행이 없음 — 팝오버에서 '로컬 자동 감지'로 먼저 등록")
+                print("로컬 Claude Code 계정 행이 없음 — 팝오버의 '로컬 자동 감지'로 먼저 등록해 주세요")
                 return 1
             }
             let active = local.account.email
