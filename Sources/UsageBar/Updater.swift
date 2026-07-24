@@ -15,6 +15,8 @@ final class UpdateChecker: ObservableObject {
 
     private var loopTask: Task<Void, Never>?
     private var watchdog: Task<Void, Never>?
+    private var recheckTask: Task<Void, Never>?
+    private var startedAt = Date()
 
     /// Repo root: UserDefaults override first, else derived from the compiled
     /// source path (works as long as the checkout isn't moved).
@@ -33,6 +35,7 @@ final class UpdateChecker: ObservableObject {
 
     func start() {
         autoUpdate = SettingsStore.shared.load().autoUpdate ?? true
+        startedAt = Date()
         loopTask?.cancel()
         loopTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -54,20 +57,48 @@ final class UpdateChecker: ObservableObject {
 
     func check() async {
         guard let repo = Self.repoPath() else { return }
-        let result = await Task.detached(priority: .utility) { () -> (String?, String?) in
+        let result = await Task.detached(priority: .utility) { () -> (String?, String?, Int) in
             _ = Self.git(repo, ["fetch", "--quiet", "origin", "main"])
             let head = Self.git(repo, ["rev-parse", "--short", "HEAD"])
             let behindCount = Self.git(repo, ["rev-list", "--count", "HEAD..origin/main"])
                 .flatMap { Int($0) } ?? 0
             let remote = behindCount > 0
                 ? Self.git(repo, ["rev-parse", "--short", "origin/main"]) : nil
-            return (head, remote)
+            var age = Int.max
+            if remote != nil,
+               let ct = Self.git(repo, ["log", "-1", "--format=%ct", "origin/main"])
+                   .flatMap({ Int($0) }) {
+                age = Int(Date().timeIntervalSince1970) - ct
+            }
+            return (head, remote, age)
         }.value
         currentCommit = result.0
         availableCommit = result.1
-        // Hands-free rollout: new commit detected → install & relaunch.
+        // Hands-free rollout — with two deferrals that keep it from reading
+        // as the app misbehaving. (1) Burst coalescing: a commit younger than
+        // 5 minutes usually has siblings right behind it, so wait and update
+        // once, to the tip. (2) Startup grace: launching straight into an
+        // install-restart looks like a crash loop — let the app live for a
+        // minute first. The orange button stays live for manual installs.
         if availableCommit != nil, autoUpdate, !updating {
-            apply()
+            let freshCommit = result.2 < 300
+            let justLaunched = Date().timeIntervalSince(startedAt) < 60
+            if freshCommit || justLaunched {
+                recheckSoon()
+            } else {
+                apply()
+            }
+        }
+    }
+
+    /// One pending re-check, ~6 minutes out (burst coalescing).
+    private func recheckSoon() {
+        guard recheckTask == nil else { return }
+        recheckTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 360 * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.recheckTask = nil
+            await self?.check()
         }
     }
 
