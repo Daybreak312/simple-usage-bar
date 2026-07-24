@@ -103,6 +103,7 @@ struct ClaudeProvider: UsageProvider {
         }
 
         var details: [String] = []
+        var weeklyMax: Double?
         if let limits = obj["limits"] as? [[String: Any]] {
             for limit in limits where limit["kind"] as? String == "weekly_scoped" {
                 if let scope = limit["scope"] as? [String: Any],
@@ -110,6 +111,7 @@ struct ClaudeProvider: UsageProvider {
                    let name = model["display_name"] as? String,
                    let pct = limit["percent"] as? Double {
                     details.append("\(name) \(Int(pct))%")
+                    weeklyMax = max(weeklyMax ?? 0, pct)
                 }
             }
         }
@@ -118,6 +120,7 @@ struct ClaudeProvider: UsageProvider {
             fiveHour: window("five_hour"),
             sevenDay: window("seven_day"),
             details: details,
+            modelWeeklyMax: weeklyMax,
             fetchedAt: Date()
         )
     }
@@ -157,10 +160,21 @@ struct ClaudeProvider: UsageProvider {
     }
 
     static func readLocalCLIToken() throws -> String {
+        let item = try readLocalCLIItem()
+        guard let token = item.oauth["accessToken"] as? String else {
+            throw UsageBarError.localCLIUnavailable("자격증명 JSON 구조가 예상과 다름")
+        }
+        return token
+    }
+
+    static let keychainService = "Claude Code-credentials"
+
+    /// Full keychain item: raw JSON string + parsed claudeAiOauth payload.
+    static func readLocalCLIItem() throws -> (raw: String, oauth: [String: Any]) {
+        let out = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        proc.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let out = Pipe()
+        proc.arguments = ["find-generic-password", "-s", keychainService, "-w"]
         proc.standardOutput = out
         proc.standardError = Pipe()
         try proc.run()
@@ -169,11 +183,37 @@ struct ClaudeProvider: UsageProvider {
             throw UsageBarError.localCLIUnavailable("keychain 항목 'Claude Code-credentials' 조회 실패")
         }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = json["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String else {
+        let raw = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let json = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              let oauth = json["claudeAiOauth"] as? [String: Any] else {
             throw UsageBarError.localCLIUnavailable("자격증명 JSON 구조가 예상과 다름")
         }
-        return token
+        return (raw, oauth)
+    }
+
+    /// Overwrite the Claude Code credential item. Mirrors Claude Code's own
+    /// write path (`security add-generic-password -U … -X <hex>`), so the
+    /// item stays readable by both sides without ACL prompts — claude reads
+    /// and writes it through /usr/bin/security too (binary 확인, 2026-07-24).
+    static func writeLocalCLIItem(raw: String) throws {
+        let hex = Data(raw.utf8).map { String(format: "%02x", $0) }.joined()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        proc.arguments = [
+            "add-generic-password", "-U",
+            "-a", NSUserName(),
+            "-s", keychainService,
+            "-X", hex,
+        ]
+        let err = Pipe()
+        proc.standardOutput = Pipe()
+        proc.standardError = err
+        try proc.run()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else {
+            let msg = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw UsageBarError.invalidCredentials("keychain 쓰기 실패: \(msg.prefix(120))")
+        }
     }
 }

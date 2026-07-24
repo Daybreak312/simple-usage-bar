@@ -34,7 +34,7 @@ struct MenuView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
             } else {
-                ForEach(poller.states) { state in
+                ForEach(poller.visibleStates) { state in
                     AccountRow(state: state)
                 }
             }
@@ -462,6 +462,7 @@ struct SettingsView: View {
     @State private var slack = ""
     @State private var status: String?
     @State private var busy = false
+    @State private var autoRoll = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -502,9 +503,27 @@ struct SettingsView: View {
             }
             .toggleStyle(.checkbox)
 
+            Toggle(isOn: Binding(
+                get: { autoRoll },
+                set: { on in
+                    autoRoll = on
+                    var s = SettingsStore.shared.load()
+                    s.autoRoll = on
+                    try? SettingsStore.shared.save(s)
+                }
+            )) {
+                Text("Claude 계정 자동 롤링 — 5h/7d/모델 주간 중 하나가 95% 이상이면 다음 계정으로 교체")
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            Text("주의: 이 맥의 Claude Code 로그인 자체가 바뀝니다 (claude CLI를 쓰는 모든 도구에 적용). 교체 전 기존 계정의 토큰은 앱에 자동 보존됩니다.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Divider()
 
-            Text("계정별로 3분마다 조회 (80% 이상이면 1분). 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알럿 — 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
+            Text("계정별로 3분마다 조회. 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알럿 — 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -539,14 +558,18 @@ struct SettingsView: View {
             let s = SettingsStore.shared.load()
             discord = s.discordURL
             slack = s.slackURL
+            autoRoll = s.autoRoll ?? false
         }
     }
 
     private func save() {
         do {
-            try SettingsStore.shared.save(AppSettings(
-                slackURL: slack.trimmingCharacters(in: .whitespacesAndNewlines),
-                discordURL: discord.trimmingCharacters(in: .whitespacesAndNewlines)))
+            // Load-modify-save: settings.json holds pin/window/autoUpdate/
+            // autoRoll too — overwriting with a fresh struct wiped them.
+            var s = SettingsStore.shared.load()
+            s.slackURL = slack.trimmingCharacters(in: .whitespacesAndNewlines)
+            s.discordURL = discord.trimmingCharacters(in: .whitespacesAndNewlines)
+            try SettingsStore.shared.save(s)
             status = "저장됨"
         } catch {
             status = "저장 실패: \(error.localizedDescription)"

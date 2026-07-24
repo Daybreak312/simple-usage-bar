@@ -39,6 +39,13 @@ struct Account: Codable, Identifiable, Equatable {
     }
 }
 
+extension Account {
+    /// Comparable identity: the label without the local-login marker.
+    var email: String {
+        label.hasSuffix(" (로컬)") ? String(label.dropLast(" (로컬)".count)) : label
+    }
+}
+
 /// Secrets for one account. Fields used depend on the provider.
 struct AccountSecrets: Codable {
     var accessToken: String?
@@ -46,6 +53,16 @@ struct AccountSecrets: Codable {
     var idToken: String?
     /// Codex: ChatGPT-Account-Id header value.
     var accountId: String?
+    /// Claude: access token expiry (ms epoch), mirrored from the token response.
+    var expiresAtMs: Int64?
+    /// Claude: scopes granted to this token pair. nil = legacy registration
+    /// (the old 3-scope set) — still usable for rolling, with degraded
+    /// Claude Code features (no sessions/MCP/file-upload scopes).
+    var scopes: [String]?
+    /// Claude rolling: verbatim keychain item JSON harvested when this
+    /// account was last active locally. Restoring it hands Claude Code back
+    /// the exact lineage (subscriptionType/rateLimitTier included).
+    var claudeKeychainItem: String?
 }
 
 struct WindowUsage: Equatable {
@@ -59,6 +76,9 @@ struct UsageSnapshot: Equatable {
     var sevenDay: WindowUsage?
     /// Short extra facts, e.g. model-scoped weekly limits or plan/credits.
     var details: [String] = []
+    /// Claude: highest model-scoped weekly limit percent (e.g. Fable weekly).
+    /// Feeds the rolling trip metric alongside 5h/7d.
+    var modelWeeklyMax: Double?
     var fetchedAt: Date
     /// Identity the provider observed during this fetch, when it can know it
     /// (local-CLI accounts: the login can switch to another account between

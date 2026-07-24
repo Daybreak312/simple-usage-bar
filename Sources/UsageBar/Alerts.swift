@@ -25,6 +25,8 @@ struct AppSettings: Codable {
     var menuBarWindow: String?
     /// Auto-install updates when a new commit is detected. nil = true.
     var autoUpdate: Bool?
+    /// Claude 계정 자동 롤링 (95% 도달 시 키체인 로그인 교체). nil = false.
+    var autoRoll: Bool?
 
     var isEmpty: Bool { slackURL.isEmpty && discordURL.isEmpty }
 }

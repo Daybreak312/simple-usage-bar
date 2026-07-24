@@ -13,7 +13,14 @@ enum ClaudeOAuth {
     static let authorizeBase = "https://claude.ai/oauth/authorize"
     static let tokenURL = "https://console.anthropic.com/v1/oauth/token"
     static let redirectURI = "https://console.anthropic.com/oauth/code/callback"
-    static let scopes = "org:create_api_key user:profile user:inference"
+    /// Claude Code's own login scope set (키체인 실물에서 확인, 2026-07-24).
+    /// Matching it exactly makes tokens registered here swap-compatible with
+    /// Claude Code for account rolling. Accounts registered before this change
+    /// carry the old 3-scope set (`org:create_api_key user:profile
+    /// user:inference`) — rolling still works, with degraded CC features.
+    static let scopes =
+        "user:file_upload user:inference user:mcp_servers user:profile user:sessions:claude_code"
+    static let legacyScopes = ["org:create_api_key", "user:profile", "user:inference"]
 
     struct Session {
         let url: URL
@@ -68,12 +75,14 @@ enum ClaudeOAuth {
         guard let access = obj["access_token"] as? String else {
             throw UsageBarError.parse("access_token 없음")
         }
-        let secrets = AccountSecrets(
+        var secrets = AccountSecrets(
             accessToken: access,
             refreshToken: obj["refresh_token"] as? String,
             idToken: nil,
             accountId: nil
         )
+        secrets.expiresAtMs = Self.expiryMs(from: obj)
+        secrets.scopes = Self.grantedScopes(from: obj) ?? scopes.split(separator: " ").map(String.init)
         var email: String?
         if let account = obj["account"] as? [String: Any] {
             email = (account["email_address"] as? String) ?? (account["email"] as? String)
@@ -104,7 +113,20 @@ enum ClaudeOAuth {
         var updated = secrets
         updated.accessToken = obj["access_token"] as? String ?? updated.accessToken
         updated.refreshToken = obj["refresh_token"] as? String ?? updated.refreshToken
+        updated.expiresAtMs = Self.expiryMs(from: obj) ?? updated.expiresAtMs
+        updated.scopes = Self.grantedScopes(from: obj) ?? updated.scopes
         return updated
+    }
+
+    /// Token responses carry `expires_in` (seconds); convert to ms epoch.
+    private static func expiryMs(from obj: [String: Any]) -> Int64? {
+        guard let seconds = obj["expires_in"] as? Double else { return nil }
+        return Int64(Date().timeIntervalSince1970 * 1000) + Int64(seconds * 1000)
+    }
+
+    private static func grantedScopes(from obj: [String: Any]) -> [String]? {
+        guard let scope = obj["scope"] as? String, !scope.isEmpty else { return nil }
+        return scope.split(separator: " ").map(String.init)
     }
 
     private static func randomURLSafe(_ count: Int) -> String {

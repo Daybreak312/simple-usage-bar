@@ -10,7 +10,7 @@ import Foundation
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-codex", "remove", "update", "webhook", "notify", "help", "--help"]
+        return ["check", "list", "add-claude", "add-codex", "remove", "roll", "update", "webhook", "notify", "help", "--help"]
             .contains(args[1])
     }
 
@@ -148,8 +148,61 @@ enum CLI {
                 print("등록된 계정 없음 — usagebar add-claude / add-codex 먼저")
                 return 1
             }
-            print(TUIFormat.board(board))
+            print(TUIFormat.board(visible(board)))
             return failed ? 2 : 0
+
+        case "roll":
+            // Claude Code 키체인 로그인을 다른 등록 계정으로 교체.
+            //   usagebar roll [--to <email>] [--dry-run]
+            // --to 없이 실행하면 자동 롤링과 같은 후보 선정 로직을 따른다.
+            let (board, _) = await fetchBoard(store)
+            guard let local = board.first(where: {
+                $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
+            }) else {
+                print("로컬 Claude Code 계정 행이 없음 — 팝오버에서 '로컬 자동 감지'로 먼저 등록")
+                return 1
+            }
+            let active = local.account.email
+            let target: AccountState?
+            if let to = value(of: "--to", in: args) {
+                guard let found = board.first(where: {
+                    $0.account.provider == .claude && $0.account.kind == .storedToken
+                        && $0.account.email.caseInsensitiveCompare(to) == .orderedSame
+                }) else {
+                    print("'\(to)' 계정이 등록돼 있지 않음 (usagebar list로 확인)")
+                    return 1
+                }
+                if found.account.email.caseInsensitiveCompare(active) == .orderedSame {
+                    print("'\(to)'는 이미 활성 계정")
+                    return 1
+                }
+                target = found
+            } else {
+                target = await RollingEngine.candidates(
+                    states: board, activeEmail: active, store: store).first
+            }
+            guard let target else {
+                print("교체할 후보 없음 — 전 계정 지표 \(Int(RollingEngine.threshold))% 이상이거나 리프레시 토큰 미보유")
+                return 1
+            }
+            let localTrip = await RollingEngine.tripName(local.snapshot)
+            let targetTrip = await RollingEngine.tripName(target.snapshot)
+            print("활성: \(active) [\(localTrip)] → 대상: \(target.account.email) [\(targetTrip)]")
+            if args.contains("--dry-run") {
+                print("(dry-run — 변경 없음)")
+                return 0
+            }
+            do {
+                try await RollingEngine.roll(
+                    to: target.account, states: visible(board), store: store,
+                    reason: "수동 (\(localTrip))", from: active)
+                print("교체 완료 — Claude Code 활성 계정: \(target.account.email)")
+                print("GUI 앱이 떠 있으면 다음 폴링에서 자동 반영됨")
+                return 0
+            } catch {
+                print("실패: \(error.localizedDescription)")
+                return 1
+            }
 
         case "webhook":
             guard args.count > 2 else {
@@ -181,7 +234,7 @@ enum CLI {
                 guard !settings.isEmpty else { print("웹훅 URL 미등록"); return 1 }
                 let (board, _) = await fetchBoard(store)
                 let results = await AlertSender.send(
-                    header: "[!] 웹훅 테스트 - SimpleUsageBar", states: board)
+                    header: "[!] 웹훅 테스트 - SimpleUsageBar", states: visible(board))
                 var ok = true
                 for (target, code) in results {
                     let good = (200...299).contains(code)
@@ -207,6 +260,17 @@ enum CLI {
 
     private static func mask(_ url: String) -> String {
         url.isEmpty ? "(없음)" : "\(url.prefix(45))…"
+    }
+
+    /// Poller.isShadowed와 같은 규칙: 로컬 로그인과 중복되는 저장 행은 숨김.
+    private static func visible(_ board: [AccountState]) -> [AccountState] {
+        guard let local = board.first(where: {
+            $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
+        }) else { return board }
+        return board.filter {
+            !($0.account.provider == .claude && $0.account.kind == .storedToken
+                && $0.account.email.caseInsensitiveCompare(local.account.email) == .orderedSame)
+        }
     }
 
     /// Fetch every account's usage into displayable states (CLI check / webhook test).
@@ -242,6 +306,7 @@ enum CLI {
           usagebar add-claude [--oauth | --from-local-cli] [--label <이메일>]
           usagebar add-codex <auth.json | ->
           usagebar remove <uuid-prefix>
+          usagebar roll [--to <email>] [--dry-run]   Claude Code 로그인 교체
           usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
           usagebar webhook slack|discord <url> | clear | show | test
     """
