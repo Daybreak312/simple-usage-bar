@@ -29,6 +29,8 @@ struct Account: Codable, Identifiable, Equatable {
     /// User-facing identifier, normally the account email.
     var label: String
     var addedAt: Date
+    /// Rolling candidate priority — lower wins. nil = default (1).
+    var rollPriority: Int?
 
     init(provider: Provider, kind: CredentialKind, label: String) {
         self.id = UUID()
@@ -37,6 +39,8 @@ struct Account: Codable, Identifiable, Equatable {
         self.label = label
         self.addedAt = Date()
     }
+
+    var priority: Int { rollPriority ?? 1 }
 }
 
 extension Account {

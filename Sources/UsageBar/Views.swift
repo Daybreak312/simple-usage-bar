@@ -136,6 +136,16 @@ struct AccountRow: View {
                         .help("메뉴바에 이 계정 표시 중")
                 }
 
+                if !hovering, state.account.priority != 1 {
+                    Text("P\(state.account.priority)")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.08), in: Capsule())
+                        .foregroundStyle(.secondary)
+                        .help("롤링 우선순위 \(state.account.priority) (낮을수록 우선)")
+                }
+
                 Spacer()
 
                 if switching {
@@ -147,6 +157,30 @@ struct AccountRow: View {
                 }
 
                 if hovering {
+                    if state.account.provider == .claude && state.account.kind == .storedToken {
+                        Menu {
+                            ForEach(1...5, id: \.self) { p in
+                                Button {
+                                    try? AccountStore.shared.updatePriority(
+                                        for: state.account.id, p == 1 ? nil : p)
+                                    poller.reloadAccounts()
+                                } label: {
+                                    if state.account.priority == p {
+                                        Label("\(p)", systemImage: "checkmark")
+                                    } else {
+                                        Text("\(p)")
+                                    }
+                                }
+                            }
+                        } label: {
+                            Text("P\(state.account.priority)")
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("롤링 우선순위 (기본 1, 낮을수록 우선)")
+                    }
+
                     if canSwitchTo {
                         Button {
                             if confirmingSwitch {

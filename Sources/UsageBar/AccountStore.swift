@@ -45,6 +45,17 @@ final class AccountStore {
         }
     }
 
+    /// Update an account's rolling priority (nil = default 1).
+    func updatePriority(for id: UUID, _ priority: Int?) throws {
+        try queue.sync {
+            var accounts = (try? Data(contentsOf: accountsURL))
+                .flatMap { try? Self.decoder.decode([Account].self, from: $0) } ?? []
+            guard let idx = accounts.firstIndex(where: { $0.id == id }) else { return }
+            accounts[idx].rollPriority = priority
+            try write(accounts, to: accountsURL)
+        }
+    }
+
     /// Update a persisted account's display label — the local-CLI row follows
     /// whatever account Claude Code is currently logged into.
     func updateLabel(for id: UUID, _ label: String) throws {

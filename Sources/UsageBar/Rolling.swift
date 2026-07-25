@@ -76,19 +76,27 @@ enum RollingEngine {
         }
     }
 
-    /// 롤링 후보: 등록 순서대로 — 활성 계정 제외, 리프레시 토큰 보유,
-    /// 마지막 조회가 정상이며 지표가 임계 미만인 Claude 계정.
+    /// 롤링 후보: 우선순위(낮을수록 우선) → 같은 순위면 등록 순서.
+    /// 활성 계정 제외, 리프레시 토큰 보유, 마지막 조회가 정상이며 지표가
+    /// 임계 미만인 Claude 계정만.
     static func candidates(
         states: [AccountState], activeEmail: String, store: AccountStore
     ) -> [AccountState] {
-        states.filter { s in
-            s.account.provider == .claude
-                && s.account.kind == .storedToken
-                && s.account.email.caseInsensitiveCompare(activeEmail) != .orderedSame
-                && s.lastError == nil
-                && (trip(s.snapshot).map { $0 < threshold } ?? false)
-                && store.secrets(for: s.account.id)?.refreshToken != nil
-        }
+        states.enumerated()
+            .filter { _, s in
+                s.account.provider == .claude
+                    && s.account.kind == .storedToken
+                    && s.account.email.caseInsensitiveCompare(activeEmail) != .orderedSame
+                    && s.lastError == nil
+                    && (trip(s.snapshot).map { $0 < threshold } ?? false)
+                    && store.secrets(for: s.account.id)?.refreshToken != nil
+            }
+            .sorted { l, r in
+                l.element.account.priority != r.element.account.priority
+                    ? l.element.account.priority < r.element.account.priority
+                    : l.offset < r.offset
+            }
+            .map(\.element)
     }
 
     /// 실제 교체. 순서가 곧 안전장치: 회수 → 대상 리프레시·검증 → 키체인

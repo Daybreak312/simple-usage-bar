@@ -10,7 +10,7 @@ import Foundation
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-codex", "remove", "roll", "update", "webhook", "notify", "help", "--help"]
+        return ["check", "list", "add-claude", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "help", "--help"]
             .contains(args[1])
     }
 
@@ -23,9 +23,34 @@ enum CLI {
 
         case "list":
             for a in store.loadAccounts() {
-                print("\(a.id.uuidString.prefix(8))  \(a.provider.displayName.padding(toLength: 7, withPad: " ", startingAt: 0))  \(a.kind.rawValue.padding(toLength: 15, withPad: " ", startingAt: 0))  \(a.label)")
+                let prio = a.priority == 1 ? "" : "  [P\(a.priority)]"
+                print("\(a.id.uuidString.prefix(8))  \(a.provider.displayName.padding(toLength: 7, withPad: " ", startingAt: 0))  \(a.kind.rawValue.padding(toLength: 15, withPad: " ", startingAt: 0))  \(a.label)\(prio)")
             }
             return 0
+
+        case "priority":
+            // usagebar priority <email|uuid접두어> <1-9> — 낮을수록 우선, 1이 기본.
+            guard args.count > 3, let p = Int(args[3]), (1...9).contains(p) else {
+                print("사용법: usagebar priority <email|uuid접두어> <1-9>")
+                return 1
+            }
+            let key = args[2].lowercased()
+            let matches = store.loadAccounts().filter {
+                $0.id.uuidString.lowercased().hasPrefix(key)
+                    || $0.email.lowercased() == key
+            }
+            guard matches.count == 1 else {
+                print(matches.isEmpty ? "일치하는 계정 없음" : "대상이 모호함 (\(matches.count)개 일치)")
+                return 1
+            }
+            do {
+                try store.updatePriority(for: matches[0].id, p == 1 ? nil : p)
+                print("우선순위 변경: \(matches[0].label) → \(p)")
+                return 0
+            } catch {
+                print("실패: \(error.localizedDescription)")
+                return 1
+            }
 
         case "add-claude":
             do {
@@ -307,6 +332,7 @@ enum CLI {
           usagebar add-codex <auth.json | ->
           usagebar remove <uuid-prefix>
           usagebar roll [--to <email>] [--dry-run]   Claude Code 로그인 교체
+          usagebar priority <email|uuid접두어> <1-9>  롤링 우선순위 (낮을수록 우선)
           usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
           usagebar webhook slack|discord <url> | clear | show | test
     """
