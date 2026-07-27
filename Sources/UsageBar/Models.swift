@@ -111,6 +111,7 @@ struct AccountState: Identifiable, Equatable {
 
 enum UsageBarError: LocalizedError {
     case http(Int, String)
+    case rateLimited(retryAfter: TimeInterval?)
     case tokenExpired
     case invalidCredentials(String)
     case parse(String)
@@ -120,6 +121,9 @@ enum UsageBarError: LocalizedError {
         switch self {
         case .http(let code, let body):
             return "HTTP \(code): \(body.prefix(160))"
+        case .rateLimited(let after):
+            let hint = after.map { " — \(Int($0))초 뒤 재시도 가능" } ?? ""
+            return "레이트리밋 (HTTP 429)\(hint)"
         case .tokenExpired:
             return "토큰 만료 — 재발급 필요"
         case .invalidCredentials(let why):

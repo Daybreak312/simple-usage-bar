@@ -28,7 +28,16 @@ enum HTTP {
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         req.httpBody = body
         let (data, resp) = try await URLSession.shared.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let http = resp as? HTTPURLResponse
+        let code = http?.statusCode ?? 0
+        if code == 429 {
+            // 모든 엔드포인트 공통: 429는 Retry-After(초 단위 숫자형)를 실어
+            // 전용 에러로 던진다 — 폴러가 다음 조회를 그만큼 미룬다.
+            // 날짜형 Retry-After는 드물어 nil 처리(기본 주기로 재시도).
+            let after = http?.value(forHTTPHeaderField: "Retry-After")
+                .flatMap(Double.init)
+            throw UsageBarError.rateLimited(retryAfter: after)
+        }
         return (code, data)
     }
 

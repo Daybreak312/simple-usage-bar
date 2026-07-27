@@ -102,6 +102,7 @@ final class Poller: ObservableObject {
             }
             for await (id, result) in group {
                 guard let idx = states.firstIndex(where: { $0.account.id == id }) else { continue }
+                var delay = normalInterval
                 switch result {
                 case .success(let usage):
                     states[idx].snapshot = usage
@@ -119,17 +120,27 @@ final class Poller: ObservableObject {
                     }
                 case .failure(let error):
                     // 429는 일시 스로틀 — 이전 스냅샷이 있으면 그대로 두고
-                    // 라벨 옆에 지연 표시만 한다 (다음 폴링에서 자연 회복).
-                    if case UsageBarError.http(429, _) = error,
-                       states[idx].snapshot != nil {
-                        states[idx].staleNote = "429로 인해 지연됨"
-                        states[idx].lastError = nil
+                    // 라벨 옆에 지연 표시만 한다. 서버가 Retry-After를 주면
+                    // 그 계정의 다음 조회를 그만큼 미룬다 (최소 3분, 30분 캡).
+                    if case UsageBarError.rateLimited(let after) = error {
+                        if let after {
+                            delay = min(max(after, normalInterval), 1800)
+                        }
+                        if states[idx].snapshot != nil {
+                            states[idx].staleNote = delay > normalInterval
+                                ? "429로 인해 지연됨 · 재시도 \(Int((delay / 60).rounded()))분 뒤"
+                                : "429로 인해 지연됨"
+                            states[idx].lastError = nil
+                        } else {
+                            states[idx].lastError = error.localizedDescription
+                            states[idx].staleNote = nil
+                        }
                     } else {
                         states[idx].lastError = error.localizedDescription
                         states[idx].staleNote = nil
                     }
                 }
-                nextDue[id] = Date().addingTimeInterval(normalInterval)
+                nextDue[id] = Date().addingTimeInterval(delay)
             }
         }
         // Identity switch (manual /login or a roll) may have created/retired
