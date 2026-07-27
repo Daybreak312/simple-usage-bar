@@ -61,12 +61,16 @@ struct MenuView: View {
                     Button {
                         updater.apply()
                     } label: {
-                        Label("업데이트 (\(next))", systemImage: "arrow.down.circle.fill")
+                        Label(
+                            updater.pendingAutoInstall
+                                ? "업데이트 (\(next)) — 곧 자동 설치"
+                                : "업데이트 (\(next))",
+                            systemImage: "arrow.down.circle.fill")
                             .font(.caption)
                     }
                     .buttonStyle(.borderless)
                     .foregroundStyle(.orange)
-                    .help("git pull → 재빌드 → 재설치 → 자동 재시작")
+                    .help("클릭하면 즉시 설치. '곧 자동 설치'는 연속 푸시 완충/시작 유예로 잠시 대기 중이라는 뜻")
                 }
 
                 Button {
@@ -619,6 +623,12 @@ struct SettingsView: View {
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Text(updateStatusLine)
+                .font(.caption2)
+                .foregroundStyle(updater.lastRun?.state == "failed"
+                    ? AnyShapeStyle(.red) : AnyShapeStyle(.tertiary))
+                .fixedSize(horizontal: false, vertical: true)
+
             Divider()
 
             Text("계정별로 3분마다 조회합니다. 5h/7d 사용률이 50·70·80·90%를 상향 돌파하면 등록된 웹훅으로 알림을 보냅니다 — 첫 줄에 돌파한 계정·임계치, 아래에 전체 계정 보드.")
@@ -658,6 +668,30 @@ struct SettingsView: View {
             slack = s.slackURL
             autoRoll = s.autoRoll ?? false
         }
+    }
+
+    /// 업데이트 파이프라인 상태 한 줄 — 알림 권한이 없어도 여기서 보인다.
+    private var updateStatusLine: String {
+        var parts: [String] = []
+        if let checked = updater.lastCheckAt {
+            parts.append("확인 \(Self.hhmm(checked))")
+        }
+        if let run = updater.lastRun {
+            let label = switch run.state {
+            case "success": "성공"
+            case "failed": "실패"
+            default: "진행 중"
+            }
+            let detail = run.detail.isEmpty ? "" : " — \(run.detail)"
+            parts.append("마지막 실행 \(label)(\(run.commit))\(detail) \(Self.hhmm(run.at))")
+        }
+        return parts.isEmpty ? "업데이트: 아직 확인 전" : "업데이트: " + parts.joined(separator: " · ")
+    }
+
+    private static func hhmm(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f.string(from: date)
     }
 
     private func save() {

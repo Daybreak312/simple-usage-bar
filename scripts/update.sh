@@ -14,6 +14,16 @@ REPO="${1:?repo path}"
 LOG=/tmp/usagebar-update.log
 exec >>"$LOG" 2>&1
 
+# 앱이 읽는 상태 파일 — 알림 권한이 없어도 진행/결과가 UI에 보이게 한다.
+STATUS_FILE="$HOME/Library/Application Support/UsageBar/update-status.json"
+status() { # status <state> <detail>
+    local detail
+    detail=$(printf '%s' "$2" | tr -d '"\\' | head -c 120)
+    printf '{"state":"%s","detail":"%s","commit":"%s","at":%s}' \
+        "$1" "$detail" "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')" "$(date +%s)" \
+        > "$STATUS_FILE" 2>/dev/null || true
+}
+
 APP_BIN="/Applications/SimpleUsageBar.app/Contents/MacOS/SimpleUsageBar"
 
 notify() {
@@ -28,10 +38,11 @@ notify() {
 # set -e로 조용히 죽는 단계(오프라인 fetch 등)도 반드시 알림을 남긴다 —
 # 무음 실패는 앱을 "업데이트 중…"에 가둬놓는 원인이었다. || 핸들러가 있는
 # 단계는 ERR 트랩을 타지 않으므로 개별 메시지가 그대로 우선한다.
-trap 'CMD=$BASH_COMMAND; echo "ERR: $CMD"; notify "업데이트 실패: $CMD (로그: /tmp/usagebar-update.log)"' ERR
+trap 'CMD=$BASH_COMMAND; echo "ERR: $CMD"; status failed "$CMD"; notify "업데이트 실패: $CMD (로그: /tmp/usagebar-update.log)"' ERR
 
 echo "=== update run $(date '+%F %T') repo=$REPO"
 cd "$REPO"
+status running "pull·빌드 진행 중"
 
 git fetch --quiet origin main
 PREV_HEAD="$(git rev-parse HEAD)"
@@ -39,6 +50,7 @@ if git merge-base --is-ancestor origin/main HEAD; then
     echo "이미 최신 (HEAD $(git rev-parse --short HEAD))"
 else
     git pull --ff-only origin main || {
+        status failed "로컬 변경과 충돌 — 레포 정리 필요"
         notify "업데이트 실패: 로컬 변경과 충돌 (로그: $LOG)"
         echo "pull 실패 — 로컬 커밋/변경이 origin/main과 갈라짐"
         exit 1
@@ -49,6 +61,7 @@ fi
     # pull만 앞서가면 다음 확인에서 "이미 최신"으로 보여 영영 재시도하지
     # 않는다 — 되돌려서 "업데이트 있음" 상태를 유지해 다음 주기에 재시도.
     git reset --hard "$PREV_HEAD" >/dev/null 2>&1 || true
+    status failed "빌드 오류 — 다음 주기에 재시도"
     notify "업데이트 실패: 빌드 오류 (로그: $LOG)"
     echo "빌드 실패 — $PREV_HEAD 로 롤백"
     exit 1
@@ -61,5 +74,6 @@ pkill -f '\.build/(debug|release)/usagebar$' 2>/dev/null || true
 sleep 1
 open /Applications/SimpleUsageBar.app
 sleep 2
+status success "설치·재시작 완료"
 notify "업데이트 완료 — $(git rev-parse --short HEAD)"
 echo "완료: $(git rev-parse --short HEAD)"
