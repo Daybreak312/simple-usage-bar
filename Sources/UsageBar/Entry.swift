@@ -25,6 +25,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Menu bar app: no Dock icon, no app switcher entry.
         NSApp.setActivationPolicy(.accessory)
         LocalNotifier.requestAuthorizationIfBundled()
+        Self.reapZombieUpdaters()
+    }
+
+    /// App Nap 시절 얼어붙은 채 남은 과거 업데이트 스크립트 정리 — 뒤늦게
+    /// 깨어나 재설치·재시작·"완료" 알림을 반복하는 개체들. 30분 이상 경과한
+    /// 것만 죽여서 진행 중인 정상 업데이트는 건드리지 않는다.
+    static func reapZombieUpdaters() {
+        let cmd = "for pid in $(pgrep -f usagebar-update-staged 2>/dev/null); do "
+            + "e=$(ps -o etime= -p $pid 2>/dev/null | tr -d ' ' | "
+            + "awk -F'[-:]' '{n=NF; if(n==1){print int($1); next}; s=$n+$(n-1)*60; if(n>=3)s+=$(n-2)*3600; if(n>=4)s+=$(n-3)*86400; print int(s)}'); "
+            + "if [ -n \"$e\" ] && [ \"$e\" -gt 1800 ]; then kill -9 $pid 2>/dev/null; fi; done; true"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", cmd]
+        p.standardOutput = Pipe()
+        p.standardError = Pipe()
+        try? p.run()
     }
 }
 

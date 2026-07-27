@@ -6,8 +6,11 @@ set -Eeuo pipefail
 
 if [[ "${USAGEBAR_UPDATE_STAGED:-}" != "1" ]]; then
     REPO="$(cd "$(dirname "$0")/.." && pwd)"
-    cp "$0" /tmp/usagebar-update-staged.sh
-    USAGEBAR_UPDATE_STAGED=1 exec /bin/bash /tmp/usagebar-update-staged.sh "$REPO"
+    # 스테이징 경로는 실행마다 유니크 — 고정 경로를 공유하면 동시 실행이
+    # 서로의 스크립트를 덮어써 실행 중인 bash가 엉뚱한 오프셋을 읽는다.
+    STAGED="$(mktemp /tmp/usagebar-update-staged.XXXXXX)"
+    cp "$0" "$STAGED"
+    USAGEBAR_UPDATE_STAGED=1 USAGEBAR_STAGED_PATH="$STAGED" exec /bin/bash "$STAGED" "$REPO"
 fi
 
 REPO="${1:?repo path}"
@@ -16,6 +19,21 @@ exec >>"$LOG" 2>&1
 
 # launchd 스폰은 PATH가 최소라 명시 고정 (swift/git/open/brew 링크 경로 포함).
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# 낡은 스테이징 파일 청소 (정상 실행은 2분 내 끝난다).
+find /tmp -maxdepth 1 -name 'usagebar-update-staged.*' -mmin +60 -delete 2>/dev/null || true
+
+# 과거 세대 좀비 업데이트 프로세스 정리 — App Nap에 얼었다가 한참 뒤
+# 깨어나 재설치·재시작·완료 알림을 반복하는 개체들 (30분 이상 경과분만).
+for pid in $(pgrep -f 'usagebar-update-staged' 2>/dev/null); do
+    [[ "$pid" == "$$" ]] && continue
+    etime_s=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ' \
+        | awk -F'[-:]' '{n=NF; if (n==1) {print int($1); next}; s=$n + $(n-1)*60; if (n>=3) s+=$(n-2)*3600; if (n>=4) s+=$(n-3)*86400; print int(s)}')
+    if [[ -n "$etime_s" && "$etime_s" -gt 1800 ]]; then
+        kill -9 "$pid" 2>/dev/null || true
+        echo "$(date '+%F %T') 좀비 업데이트 프로세스 제거: pid=$pid (경과 ${etime_s}s)"
+    fi
+done
 
 # 동시 실행 방지 락 — launchd 잡·수동 실행·CLI가 겹칠 수 있다.
 LOCK=/tmp/usagebar-update.lock
@@ -27,7 +45,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
         exit 0
     fi
 fi
-trap 'rmdir /tmp/usagebar-update.lock 2>/dev/null || true' EXIT
+trap 'rmdir /tmp/usagebar-update.lock 2>/dev/null || true; rm -f "${USAGEBAR_STAGED_PATH:-}"' EXIT
 
 # 앱이 읽는 상태 파일 — 알림 권한이 없어도 진행/결과가 UI에 보이게 한다.
 STATUS_FILE="$HOME/Library/Application Support/UsageBar/update-status.json"
@@ -62,7 +80,11 @@ status running "pull·빌드 진행 중"
 git fetch --quiet origin main
 PREV_HEAD="$(git rev-parse HEAD)"
 if git merge-base --is-ancestor origin/main HEAD; then
-    echo "이미 최신 (HEAD $(git rev-parse --short HEAD))"
+    # 이미 최신이면 재빌드·재설치·재시작 전부 불필요 — 예전엔 여기서도
+    # 통째로 재설치해 "같은 해시로 업데이트 완료" 알림이 반복됐다.
+    echo "이미 최신 (HEAD $(git rev-parse --short HEAD)) — 재설치 생략"
+    status success "이미 최신 — 변경 없음"
+    exit 0
 else
     git pull --ff-only origin main || {
         status failed "로컬 변경과 충돌 — 레포 정리 필요"
