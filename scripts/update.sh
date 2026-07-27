@@ -14,6 +14,21 @@ REPO="${1:?repo path}"
 LOG=/tmp/usagebar-update.log
 exec >>"$LOG" 2>&1
 
+# launchd 스폰은 PATH가 최소라 명시 고정 (swift/git/open/brew 링크 경로 포함).
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# 동시 실행 방지 락 — launchd 잡·수동 실행·CLI가 겹칠 수 있다.
+LOCK=/tmp/usagebar-update.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+    if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]]; then
+        echo "$(date '+%F %T') 스테일 락(30분+) 무시하고 진행"
+    else
+        echo "$(date '+%F %T') 다른 업데이트 실행 중 — 이번 실행 종료"
+        exit 0
+    fi
+fi
+trap 'rmdir /tmp/usagebar-update.lock 2>/dev/null || true' EXIT
+
 # 앱이 읽는 상태 파일 — 알림 권한이 없어도 진행/결과가 UI에 보이게 한다.
 STATUS_FILE="$HOME/Library/Application Support/UsageBar/update-status.json"
 status() { # status <state> <detail>

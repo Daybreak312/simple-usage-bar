@@ -135,6 +135,12 @@ final class UpdateChecker: ObservableObject {
 
     /// Fire the detached updater. The app keeps running until the script has
     /// built and installed the new bundle; the script then kills and reopens it.
+    ///
+    /// launchd 일회성 잡으로 스폰하는 이유: Process로 직접 낳으면 스크립트가
+    /// 앱의 App Nap 절전 정책을 상속받아, 한참 놀던 앱에서 버튼을 누르면
+    /// 스크립트째 얼어붙는다 (다른 맥 실증상: '업데이트 중…' 무한 + 앱 종료
+    /// 후에야 좀비 스크립트가 깨어나 뒤늦게 설치). launchd 자식은 앱의 태스크
+    /// 정책·수명과 완전히 무관하다.
     func apply() {
         guard let repo = Self.repoPath(), !updating else { return }
         updating = true
@@ -142,10 +148,29 @@ final class UpdateChecker: ObservableObject {
         recheckTask?.cancel()
         recheckTask = nil
         let script = "\(repo)/scripts/update.sh"
+        // 라벨은 매번 유니크 — 기존 라벨 remove는 실행 중인 이전 잡을 죽일
+        // 수 있어 피한다. 동시 실행은 스크립트 쪽 락이 걸러낸다.
+        let label = "dev.daybreak.usagebar.update.\(Int(Date().timeIntervalSince1970))"
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = ["-c", "nohup '\(script)' >/dev/null 2>&1 &"]
-        try? proc.run()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = ["submit", "-l", label, "--", "/bin/bash", script]
+        proc.standardOutput = Pipe()
+        proc.standardError = Pipe()
+        var submitted = false
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            submitted = proc.terminationStatus == 0
+        } catch {
+            submitted = false
+        }
+        if !submitted {
+            // 폴백: 예전 방식 (App Nap 리스크는 있지만 없는 것보단 낫다)
+            let fb = Process()
+            fb.executableURL = URL(fileURLWithPath: "/bin/bash")
+            fb.arguments = ["-c", "nohup '\(script)' >/dev/null 2>&1 &"]
+            try? fb.run()
+        }
         // Success means the script kills this instance before the deadline —
         // still being alive past it means the script died somewhere (offline
         // fetch, pull conflict, build error). Unstick the UI and re-arm so
