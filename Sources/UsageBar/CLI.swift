@@ -22,8 +22,18 @@ enum CLI {
             return 0
 
         case "list":
-            for a in store.loadAccounts() {
-                let prio = a.priority == 1 ? "" : "  [P\(a.priority)]"
+            let accounts = store.loadAccounts()
+            for a in accounts {
+                // 로컬 행의 우선순위는 그 이메일의 저장 행 값을 프록시로 표시.
+                var shown = a.priority
+                if a.kind == .localClaudeCLI,
+                   let stored = accounts.first(where: {
+                       $0.provider == .claude && $0.kind == .storedToken
+                           && $0.email.caseInsensitiveCompare(a.email) == .orderedSame
+                   }) {
+                    shown = stored.priority
+                }
+                let prio = shown == 1 ? "" : "  [P\(shown)]"
                 print("\(a.id.uuidString.prefix(8))  \(a.provider.displayName.padding(toLength: 7, withPad: " ", startingAt: 0))  \(a.kind.rawValue.padding(toLength: 15, withPad: " ", startingAt: 0))  \(a.label)\(prio)")
             }
             return 0
@@ -35,17 +45,38 @@ enum CLI {
                 return 1
             }
             let key = args[2].lowercased()
-            let matches = store.loadAccounts().filter {
+            var matches = store.loadAccounts().filter {
                 $0.id.uuidString.lowercased().hasPrefix(key)
                     || $0.email.lowercased() == key
+            }
+            // 같은 이메일의 로컬 행 + 저장 행이 함께 걸리면 저장 행이 대상.
+            if matches.count > 1 {
+                let stored = matches.filter { $0.kind == .storedToken }
+                if stored.count == 1 { matches = stored }
             }
             guard matches.count == 1 else {
                 print(matches.isEmpty ? "일치하는 계정 없음" : "대상이 모호함 (\(matches.count)개 일치)")
                 return 1
             }
             do {
-                try store.updatePriority(for: matches[0].id, p == 1 ? nil : p)
-                print("우선순위 변경: \(matches[0].label) → \(p)")
+                var target = matches[0]
+                if target.kind == .localClaudeCLI {
+                    // 우선순위는 계정(이메일)에 속한다 — 로컬 행 지정 시 그
+                    // 이메일의 저장 행으로 넘기고, 없으면 자리표시 행 생성.
+                    if let stored = store.loadAccounts().first(where: {
+                        $0.provider == .claude && $0.kind == .storedToken
+                            && $0.email.caseInsensitiveCompare(target.email) == .orderedSame
+                    }) {
+                        target = stored
+                    } else {
+                        let placeholder = Account(
+                            provider: .claude, kind: .storedToken, label: target.email)
+                        try store.add(placeholder, secrets: AccountSecrets())
+                        target = placeholder
+                    }
+                }
+                try store.updatePriority(for: target.id, p == 1 ? nil : p)
+                print("우선순위 변경: \(target.label) → \(p)")
                 return 0
             } catch {
                 print("실패: \(error.localizedDescription)")

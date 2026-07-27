@@ -267,6 +267,35 @@ struct AccountRow: View {
         }
     }
 
+    /// 우선순위는 항상 "그 이메일의 저장 행"에 산다 — 로컬 행은 프록시.
+    /// 활성 계정이 바뀌어도 우선순위가 계정을 따라가게 하기 위함.
+    private var priorityStoredRow: AccountState? {
+        if state.account.kind == .storedToken { return state }
+        return poller.states.first {
+            $0.account.provider == .claude && $0.account.kind == .storedToken
+                && $0.account.email.caseInsensitiveCompare(state.account.email) == .orderedSame
+        }
+    }
+
+    private var displayPriority: Int { priorityStoredRow?.account.priority ?? 1 }
+
+    private func setPriority(_ p: Int) {
+        let store = AccountStore.shared
+        var targetId = priorityStoredRow?.account.id
+        if targetId == nil {
+            // 저장 행이 아직 없는 로컬 계정: 자리표시 행 생성. 활성 동안은
+            // 섀도 처리로 숨고, 롤아웃 시 harvest가 토큰을 채운다.
+            let placeholder = Account(
+                provider: .claude, kind: .storedToken, label: state.account.email)
+            try? store.add(placeholder, secrets: AccountSecrets())
+            targetId = placeholder.id
+        }
+        if let targetId {
+            try? store.updatePriority(for: targetId, p == 1 ? nil : p)
+        }
+        poller.reloadAccounts()
+    }
+
     /// 전환 버튼 노출 조건: Claude 저장 계정 + 로컬 행(전환 추적 주체) 존재.
     /// 섀도잉 덕에 화면에 보이는 저장 행은 곧 "현재 비활성" 계정이다.
     private var canSwitchTo: Bool {
