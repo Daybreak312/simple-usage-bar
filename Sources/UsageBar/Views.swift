@@ -133,6 +133,13 @@ struct AccountRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
+                if let note = state.staleNote {
+                    Text("(\(note))")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .help("마지막 성공 조회 값을 표시 중 — 다음 폴링에서 자동 회복")
+                }
+
                 if poller.pinnedAccountId == state.account.id {
                     Image(systemName: "pin.fill")
                         .font(.system(size: 9))

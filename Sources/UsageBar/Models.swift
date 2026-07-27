@@ -96,6 +96,9 @@ struct AccountState: Identifiable, Equatable {
     var snapshot: UsageSnapshot?
     var lastError: String?
     var isRefreshing: Bool = false
+    /// 최신 조회가 일시 실패(429 레이트리밋 등)해 지금 보이는 스냅샷이
+    /// 이전 값일 때의 안내 문구. 성공 조회가 오면 지워진다.
+    var staleNote: String?
 
     var id: UUID { account.id }
 

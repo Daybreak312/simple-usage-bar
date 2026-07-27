@@ -106,6 +106,7 @@ final class Poller: ObservableObject {
                 case .success(let usage):
                     states[idx].snapshot = usage
                     states[idx].lastError = nil
+                    states[idx].staleNote = nil
                     // Follow the identity seen on this fetch (local-CLI login
                     // can switch accounts anytime). Re-baseline alerts so the
                     // switch itself never reads as a threshold crossing.
@@ -117,7 +118,16 @@ final class Poller: ObservableObject {
                         identityChanged = true
                     }
                 case .failure(let error):
-                    states[idx].lastError = error.localizedDescription
+                    // 429는 일시 스로틀 — 이전 스냅샷이 있으면 그대로 두고
+                    // 라벨 옆에 지연 표시만 한다 (다음 폴링에서 자연 회복).
+                    if case UsageBarError.http(429, _) = error,
+                       states[idx].snapshot != nil {
+                        states[idx].staleNote = "429로 인해 지연됨"
+                        states[idx].lastError = nil
+                    } else {
+                        states[idx].lastError = error.localizedDescription
+                        states[idx].staleNote = nil
+                    }
                 }
                 nextDue[id] = Date().addingTimeInterval(normalInterval)
             }

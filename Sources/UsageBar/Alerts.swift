@@ -92,16 +92,18 @@ enum TUIFormat {
         let rows: [Row] = states.map { state in
             let name = state.account.provider.displayName
                 .padding(toLength: 6, withPad: " ", startingAt: 0)
+            let label = state.staleNote.map { "\(state.account.label) (\($0))" }
+                ?? state.account.label
             if let error = state.lastError {
-                return Row(name: name, label: state.account.label,
+                return Row(name: name, label: label,
                            five: nil, seven: nil, tail: "오류: \(error)")
             }
             guard let snap = state.snapshot else {
-                return Row(name: name, label: state.account.label,
+                return Row(name: name, label: label,
                            five: nil, seven: nil, tail: "데이터 없음")
             }
             return Row(
-                name: name, label: state.account.label,
+                name: name, label: label,
                 five: gauge("5h", snap.fiveHour),
                 seven: gauge("7d", snap.sevenDay),
                 tail: snap.details.isEmpty ? nil : snap.details.joined(separator: ", "))

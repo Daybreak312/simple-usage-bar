@@ -45,6 +45,7 @@ enum RollingEngine {
                   $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
               }),
               local.lastError == nil,
+              local.staleNote == nil,  // 지연된 값으로는 롤링 판단하지 않음
               let t = trip(local.snapshot), t >= threshold else {
             notifiedExhausted = false
             return false
@@ -88,6 +89,7 @@ enum RollingEngine {
                     && s.account.kind == .storedToken
                     && s.account.email.caseInsensitiveCompare(activeEmail) != .orderedSame
                     && s.lastError == nil
+                    && s.staleNote == nil
                     && (trip(s.snapshot).map { $0 < threshold } ?? false)
                     && store.secrets(for: s.account.id)?.refreshToken != nil
             }
