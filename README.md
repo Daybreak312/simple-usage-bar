@@ -84,6 +84,10 @@ rm -rf /tmp/cx
 
 ## CLI
 
+`make-app.sh --install`(자동 업데이트 포함)이 `/opt/homebrew/bin/usagebar` 링크를
+만들어, 터미널 어디서든 `usagebar <명령>`으로 쓸 수 있다. GUI와 같은 바이너리라
+데이터도 완전히 같다. 인자 없이 터미널에서 실행하면 도움말이 나온다.
+
 | 명령 | 설명 |
 |---|---|
 | `usagebar check` | 모든 계정 사용량을 stdout으로 (GUI 없이 파이프라인 검증) |

@@ -8,6 +8,14 @@ enum Entry {
         if CLI.shouldRun(args) {
             exit(await CLI.run(args))
         }
+        // 터미널에서 인자 없이(또는 오타로) 실행하면 GUI 인스턴스를 하나 더
+        // 띄우는 대신 도움말을 보여준다. Finder/launchd 실행은 TTY가 없어
+        // 기존대로 GUI로 간다.
+        if isatty(fileno(stdout)) != 0 {
+            if args.count > 1 { print("알 수 없는 명령: \(args[1])\n") }
+            _ = await CLI.run([args[0], "help"])
+            exit(args.count > 1 ? 1 : 0)
+        }
         UsageBarApp.main()
     }
 }
