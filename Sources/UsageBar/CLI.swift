@@ -10,7 +10,7 @@ import Foundation
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "help", "--help"]
+        return ["check", "list", "add-claude", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "parse-codex", "help", "--help"]
             .contains(args[1])
     }
 
@@ -198,6 +198,28 @@ enum CLI {
             print(ok ? "완료 — 앱이 재시작됨" : "실패 — 로그 확인: tail /tmp/usagebar-update.log")
             return ok ? 0 : 1
 
+        case "parse-codex":
+            // wham/usage 응답 JSON(stdin)을 실제 파서에 통과시켜 창 배치를 확인.
+            // 표시가 이상할 때 원본 응답만 받아오면 매핑을 재현해볼 수 있다.
+            let data = FileHandle.standardInput.readDataToEndOfFile()
+            do {
+                let snap = try CodexProvider.parseUsage(data)
+                let fmt = DateFormatter()
+                fmt.dateFormat = "MM-dd HH:mm"
+                func line(_ name: String, _ w: WindowUsage?) {
+                    guard let w else { print("\(name)  —"); return }
+                    let reset = w.resetsAt.map { "  (리셋 \(fmt.string(from: $0)))" } ?? ""
+                    print("\(name)  \(Int(w.percent.rounded()))% 사용\(reset)")
+                }
+                line("5h", snap.fiveHour)
+                line("7d", snap.sevenDay)
+                if !snap.details.isEmpty { print(snap.details.joined(separator: " · ")) }
+                return 0
+            } catch {
+                print("파싱 실패: \(error.localizedDescription)")
+                return 1
+            }
+
         case "check":
             let (board, failed) = await fetchBoard(store)
             guard !board.isEmpty else {
@@ -366,5 +388,6 @@ enum CLI {
           usagebar priority <email|uuid접두어> <1-9>  롤링 우선순위 (낮을수록 우선)
           usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
           usagebar webhook slack|discord <url> | clear | show | test
+          usagebar parse-codex     wham/usage JSON(stdin) 파싱 결과 확인 (디버그)
     """
 }

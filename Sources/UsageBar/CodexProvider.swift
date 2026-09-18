@@ -7,6 +7,8 @@ import Foundation
 ///   Headers: Authorization: Bearer <access> + ChatGPT-Account-Id + User-Agent: codex-cli
 ///   Response: rate_limit.primary_window/secondary_window
 ///             {used_percent, reset_at: epoch sec, limit_window_seconds}, plan_type, credits.
+///   Window positions are NOT fixed to durations — weekly-only plans send the
+///   7d window as primary_window with secondary_window null.
 ///
 /// Refresh: POST https://auth.openai.com/oauth/token — refresh tokens are
 /// SINGLE-USE and rotate. The rotated token must be persisted immediately or
@@ -68,7 +70,7 @@ struct CodexProvider: UsageProvider {
         let obj = try HTTP.json(data)
         let rateLimit = obj["rate_limit"] as? [String: Any] ?? obj
 
-        func window(_ key: String) -> WindowUsage? {
+        func window(_ key: String) -> (usage: WindowUsage, seconds: Double?)? {
             guard let w = rateLimit[key] as? [String: Any] else { return nil }
             let pct = (w["used_percent"] as? Double) ?? (w["used_percent"] as? Int).map(Double.init)
             guard let pct else { return nil }
@@ -76,7 +78,30 @@ struct CodexProvider: UsageProvider {
             if resets == nil, let inSec = w["resets_in_seconds"] as? Double {
                 resets = Date().addingTimeInterval(inSec)
             }
-            return WindowUsage(percent: pct, resetsAt: resets)
+            let seconds = (w["limit_window_seconds"] as? Double)
+                ?? (w["limit_window_seconds"] as? Int).map(Double.init)
+            return (WindowUsage(percent: pct, resetsAt: resets), seconds)
+        }
+
+        // Slot windows by duration, not by position: weekly-only plans deliver
+        // the 7d window in primary_window with secondary_window null (verified
+        // against CodexBar's fixtures). Positional fallback when
+        // limit_window_seconds is absent; on slot collision, fill the vacant
+        // slot so no window is dropped.
+        var fiveHour: WindowUsage?
+        var sevenDay: WindowUsage?
+        for (key, weeklyByPosition) in [("primary_window", false), ("secondary_window", true)] {
+            guard let w = window(key) else { continue }
+            let weekly = w.seconds.map { $0 >= 86_400 } ?? weeklyByPosition
+            if weekly, sevenDay == nil {
+                sevenDay = w.usage
+            } else if !weekly, fiveHour == nil {
+                fiveHour = w.usage
+            } else if sevenDay == nil {
+                sevenDay = w.usage
+            } else if fiveHour == nil {
+                fiveHour = w.usage
+            }
         }
 
         var details: [String] = []
@@ -90,8 +115,8 @@ struct CodexProvider: UsageProvider {
         }
 
         return UsageSnapshot(
-            fiveHour: window("primary_window"),
-            sevenDay: window("secondary_window"),
+            fiveHour: fiveHour,
+            sevenDay: sevenDay,
             details: details,
             fetchedAt: Date()
         )
