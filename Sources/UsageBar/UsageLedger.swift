@@ -318,6 +318,15 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
         } ?? []
     }
 
+    /// Earliest ledger day of one account (nil = nothing counted, or no
+    /// ledger yet) — tells "no record ever" apart from "none this period".
+    func firstDay(account: UUID) throws -> String? {
+        try withReader { db in
+            try db.prepare("SELECT MIN(day) FROM usage WHERE account = ?")
+                .query([.text(account.uuidString)]) { $0.text(0) }.first
+        } ?? nil
+    }
+
     /// Local day string of `date` in the ledger's time zone.
     func day(_ date: Date) -> String { DayFormatter(timeZone: timeZone).string(date) }
 

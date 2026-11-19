@@ -240,6 +240,7 @@ struct AccountRow: View {
                     Button {
                         // 활성 계정을 지우면 그 토큰이 active 파일에 남지 않게.
                         ActiveAccountStore.shared.clear(ifActive: state.account.id)
+                        DetailWindowController.shared.close(accountId: state.account.id)
                         try? AccountStore.shared.remove(id: state.account.id)
                         poller.reloadAccounts()
                         poller.reloadActive()
@@ -249,6 +250,19 @@ struct AccountRow: View {
                     }
                     .buttonStyle(.borderless)
                     .help("계정 제거")
+                }
+
+                // 항상 보이는 「자세히」 — 호버 컨트롤이 왼쪽에 나타나도 자리가
+                // 바뀌지 않게 맨 끝에 둔다. 1년 토큰 계정만 (레거시·Codex 없음).
+                if state.account.isClaudeToken {
+                    Button {
+                        DetailWindowController.shared.show(state.account, poller: poller)
+                    } label: {
+                        Image(systemName: "chart.xyaxis.line")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("자세히")
                 }
             }
 

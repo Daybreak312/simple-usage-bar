@@ -232,10 +232,11 @@ final class Poller: ObservableObject {
     /// Kick off one background ledger scan (and the daily price-table
     /// refresh) when due. The scan does blocking file and SQLite I/O, so it
     /// runs on a GCD utility queue — never on the main thread or the Swift
-    /// concurrency pool; the tick never waits on it.
-    func scanLedgerIfDue(now: Date = Date()) {
+    /// concurrency pool; the tick never waits on it. `force` (the detail
+    /// window's refresh button) skips the interval, never a running scan.
+    func scanLedgerIfDue(now: Date = Date(), force: Bool = false) {
         guard !ledgerScanRunning,
-              lastLedgerScan.map({ now.timeIntervalSince($0) >= Self.ledgerInterval }) ?? true else { return }
+              force || lastLedgerScan.map({ now.timeIntervalSince($0) >= Self.ledgerInterval }) ?? true else { return }
         lastLedgerScan = now
         ledgerScanRunning = true
         let hashes = tokenHashes(states.map(\.account))
