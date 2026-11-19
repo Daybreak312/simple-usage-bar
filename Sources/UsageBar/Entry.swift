@@ -5,6 +5,10 @@ import SwiftUI
 enum Entry {
     static func main() async {
         let args = CommandLine.arguments
+        // usagebar-claude의 stdout 관측기 — GUI·저장소 초기화 없이 곧장 통과 루프.
+        if args.count > 1, args[1] == ClaudeObserver.command {
+            exit(ClaudeObserver.main(args))
+        }
         if CLI.shouldRun(args) {
             exit(await CLI.run(args))
         }
