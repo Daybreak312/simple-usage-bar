@@ -139,6 +139,72 @@ claude 호출이 깨진다 — 래퍼는 관측기를 이 고정 경로로만 �
 실측 약 20ms)을 확인한다. 실제 claude·토큰·네트워크를 쓰지 않는다. 시험용 env:
 `USAGEBAR_CLAUDE_DIR`(데이터 디렉터리), `USAGEBAR_OBSERVER_BIN`, `USAGEBAR_CLAUDE_SEARCH_PATHS`.
 
+## 사용량 장부 (토큰 · API 환산 비용)
+
+계정별로 토큰을 얼마나, 어떤 모델로 썼고 API 정가로 치면 얼마어치인지를 일 단위로 쌓는다.
+ccusage(오픈소스)와 같은 원천·단가표·중복 제거 키를 쓴다.
+
+**원천:** Claude Code가 남기는 세션 기록 `~/.claude/projects/<cwd>/<세션 id>.jsonl`과 서브에이전트
+기록 `…/<세션 id>/subagents/agent-*.jsonl`(줄의 `sessionId` = 부모 세션). 대화형 터미널 실행도
+여기 남으므로 모든 호출 경로를 같은 방식으로 덮는다. 기록 파일은 읽기만 한다(수정·삭제 없음).
+
+- 대상 줄: `type == "assistant"`이고 `message.usage`가 있는 줄. 모델 `<synthetic>`(claude가 API
+  호출 없이 남기는 오류 자리표시)은 뺀다.
+- **중복 제거:** 한 응답이 콘텐츠 블록마다 같은 usage로 여러 줄 기록되므로 `message.id` +
+  `requestId`(둘 중 하나가 없으면 `uuid`)가 같은 줄은 한 번만 센다.
+- 토큰 6구분: 입력(`input_tokens`), 출력(`output_tokens`), 캐시 쓰기 5분
+  (`cache_creation.ephemeral_5m_input_tokens`), 캐시 쓰기 1시간(`ephemeral_1h_input_tokens`),
+  캐시 읽기(`cache_read_input_tokens`), 웹 검색 횟수(`server_tool_use.web_search_requests`).
+  `cache_creation` 내역 없이 `cache_creation_input_tokens`만 있으면 5분으로 본다.
+
+**계정 귀속:** 메시지(sessionId, timestamp) → `launches.jsonl`에서 같은 세션의 실행 기록 중
+**시작 시각 ≤ 메시지 시각인 가장 늦은 것**의 계정. OpenClaw처럼 같은 세션을 매 턴 새 프로세스로
+`--resume`하면, 롤링 뒤의 턴은 새 계정으로 간다(래퍼는 exec라 종료 시각이 없어 시작 시각만 쓴다).
+그 실행 기록의 `accountId`가 null이면 `tokenHash`를 등록된 1년 토큰과 대조한다. 실행 기록의
+`sessionId`가 null이면(`--fork-session` 등) 관측기의 `session` 이벤트(같은 `launchId`)로
+채우고, 래퍼의 추정(`--continue` = 가장 최근 기록 파일)과 claude가 실제로 쓴 세션이 다르면
+관측된 쪽을 따른다. 실행 기록이 없거나 계정을 못 정한 메시지(래퍼를 거치지 않은 호출, 키체인
+로그인 실행)는 **집계하지 않는다**.
+
+**추적 시작 이후만:** 처음 집계할 때 「`launches.jsonl`의 가장 이른 ts」를 추적 시작 시각으로
+정해 장부에 고정한다(실행 기록이 나중에 정리돼도 안 바뀜). 그보다 이른 메시지는 버리고, 마지막
+수정 시각이 그보다 이른 기록 파일은 열지도 않는다 — 기존 기록을 백필하지 않는다. 또 90일 넘은
+메시지는 받지 않는다(중복 제거 키를 90일 보관하므로 — 실행 기록 보존 기간과 같다).
+
+**증분 집계:** 앱이 1분마다(폴러 틱, 백그라운드 큐) 파일별 (inode, 읽은 바이트 오프셋)부터 새로
+붙은 완결 줄만 읽는다. 개행 없는 마지막 줄은 다음 주기로 미룬다. inode가 바뀌었거나 파일이
+줄었으면 처음부터 다시 읽되 중복 제거 키로 이중 집계를 막는다. 귀속될 수 없는 줄(실행 기록 없는
+세션의 1분 넘은 줄)은 JSON 파싱 없이 건너뛴다. 이 맥 실측: 최근 3일치 기록 1,408개 파일
+(439MB) 첫 집계 약 1.5초, 이후 주기 약 0.15초(디버그 빌드).
+
+**API 환산 비용:** 같은 토큰을 Anthropic API 정가로 계산한 값 — 구독 청구액이 아니다(어디서나
+이 이름으로 표기). 단가는 [LiteLLM 단가표](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json)
+(ccusage가 쓰는 원본).
+
+- 모델 대조: 정확 일치 → 날짜 접미사 제거(`-20251001` 등) → `anthropic/` 접두.
+- 비용 = 입력×`input_cost_per_token` + 출력×`output_cost_per_token` + 5분 캐시×
+  `cache_creation_input_token_cost` + 1시간 캐시×`cache_creation_input_token_cost_above_1hr`
+  (없으면 5분 단가) + 캐시 읽기×`cache_read_input_token_cost` + 웹 검색×
+  `search_context_cost_per_query.search_context_size_medium`(없으면 0). 그 뒤 `usage.speed ==
+  "fast"`면 `provider_specific_entry.fast`, `usage.inference_geo == "us"`면
+  `provider_specific_entry.us` 배수를 곱한다(항목에 있을 때만). 장문 구간 할증은 반영하지 않는다
+  (대상 모델 항목에 없음).
+- 검증: haiku-4-5 응답 1건(입력 10 / 출력 891 / 캐시 읽기 17,957 / 1시간 캐시 44,247) =
+  $0.0947547 = CLI `modelUsage.claude-haiku-4-5.costUSD`(단위 테스트로 고정).
+- 단가를 못 찾은 모델(또는 캐시 단가 없이 캐시 토큰이 있는 경우)은 토큰만 집계하고 「단가 미상」
+  으로 표시한다 — $0으로 위장하지 않으며, 합계는 「$X + 단가 미상」이 된다.
+- 비용은 장부에 저장하지 않고 **표시할 때** 토큰 × 현재 단가로 계산한다(단가표가 갱신되면 과거
+  비용도 같은 표로 다시 계산 — fast/us 응답은 장부에서 따로 칸을 둬 배수를 나중에도 적용한다).
+- 단가표 원천: 앱이 하루 1회 원격 표를 받아 Claude 항목만 추려 `claude/prices.json`에 캐시한다.
+  실패(네트워크·HTTP·파싱·Claude 항목 없음)하면 기존 캐시 → 앱에 컴파일된 번들 사본 순으로 쓰고
+  6시간 뒤 다시 시도한다. 번들 사본은 `Sources/UsageBar/BundledPrices.swift`(출처 URL·받은 날짜
+  기록) — `swift scripts/update-bundled-prices.swift [litellm.json]`로 다시 만든다.
+
+**조회:** `usagebar stats [--days N] [--account <email>] [--json] [--refresh]` — 일별·계정별·모델별
+토큰과 API 환산 비용(기본 최근 7일, 맥 로컬 날짜). GUI 없이 장부 파일만 읽고 네트워크를 쓰지
+않는다(단가는 캐시/번들). `--refresh`는 앱과 같은 집계를 1회 실행한다(앱과 동시에 돌아도
+SQLite 쓰기 잠금으로 차례로 실행).
+
 ## CLI
 
 `make-app.sh --install`(자동 업데이트 포함)이 `/opt/homebrew/bin/usagebar` 링크를
@@ -154,6 +220,7 @@ claude 호출이 깨진다 — 래퍼는 관측기를 이 고정 경로로만 �
 | `usagebar remove <uuid-prefix>` | 계정 제거 |
 | `usagebar roll [--to <email>] [--dry-run]` | 활성 Claude 계정(활성 계정 파일) 교체 |
 | `usagebar priority <email\|uuid> <1-9>` | 롤링 우선순위 |
+| `usagebar stats [--days N] [--account <email>] [--json] [--refresh]` | 사용량 장부 — 일별·계정별·모델별 토큰과 API 환산 비용 |
 | `usagebar observe-claude --launch <id> --dir <경로>` | `usagebar-claude` 내부용 stdout 관측기 (직접 쓸 일 없음) |
 
 ## 데이터 위치
@@ -179,6 +246,10 @@ claude 호출이 깨진다 — 래퍼는 관측기를 이 고정 경로로만 �
     라이브 파일의 첫 줄이 7일 지나면 앱이 `X.rotating.jsonl`로 rename(다음 append가 새
     라이브 파일을 만든다) → 1초 뒤 보관본에 합치고 지운다. 보관본은 하루 한 번 90일 지난
     줄을 지운다. 전체 기록은 `X.1.jsonl` → `X.rotating.jsonl` → `X.jsonl` 순서로 읽는다.
+  - `ledger.sqlite` (0600, WAL) — 사용량 장부. `usage`(계정 × 로컬 날짜 × 모델 × fast/us별 토큰
+    6구분·응답 수, 400일 보존), `seen`(중복 제거 키 `message.id:requestId`, 90일 보존), `files`(세션 기록
+    파일별 inode·오프셋), `meta`(`trackingStartedAt`). 토큰(비밀)·대화 내용·cwd는 저장하지 않는다.
+  - `prices.json` — LiteLLM 단가표의 Claude 부분 캐시(하루 1회 갱신)
 - `~/Library/Application Support/UsageBar/bin/` (0700) — `usagebar-claude` 래퍼와 관측기
   실행 파일 사본 (`make-app.sh --install`이 갱신)
 - 폴링: 계정별 독립 스케줄 — 사용량과 무관하게 평탄한 3분 주기.
@@ -223,6 +294,23 @@ content-type: application/json
   — result 줄은 `type`이 맨 앞이 아니다. 컴팩트 JSON(공백 없음).
 - `-p`에서 stdin이 TTY가 아니면 claude가 stdin을 기다린다(3초 뒤 경고) — 래퍼는 stdin을
   건드리지 않으므로 호출자가 `< /dev/null` 등으로 정한다.
+
+### Claude Code 세션 기록 (사용량 장부 원천, 같은 날 실측)
+
+- 경로 `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`, 서브에이전트
+  `…/<sessionId>/subagents/agent-*.jsonl`(F6). assistant 줄 키: `sessionId`(서브에이전트도 부모 id),
+  `timestamp`(ISO8601 UTC, 소수 3자리), `requestId`, `uuid`, `isSidechain`, `cwd`,
+  `message.{id, model, usage}`. 비용 필드는 없다.
+- 한 응답이 콘텐츠 블록별로 여러 줄 기록되며 같은 `message.id`+`requestId`·같은 usage가 반복된다
+  (이 맥 최근 하루치 2,462개 키 중 1,576개가 반복, 반복 간 usage 차이 0건).
+- `usage`(F7): `input_tokens`, `output_tokens`, `cache_read_input_tokens`,
+  `cache_creation_input_tokens`, `cache_creation.{ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}`,
+  `server_tool_use.{web_search_requests, web_fetch_requests}`, `speed`(`standard`/`fast`),
+  `inference_geo`(`global`/`us`/`not_available` …), `service_tier`.
+- LiteLLM 단가표(F8)에 `claude-opus-5-5`·`claude-fable-5-1`·`claude-sonnet-5`·`claude-sonnet-5-5`·
+  `claude-haiku-4-5`(+`-20251001`)·`claude-opus-4-8` 등이 있고, 필드는 위 비용 공식의 것들
+  (opus-5-5 `provider_specific_entry` = `{"us":1.1,"fast":2}`). 이 단가로 계산한 값이 CLI
+  `modelUsage.<모델>.costUSD`와 일치한다(F9).
 
 ### Codex — 스펙은 codex-rs 소스 기준, 토큰 만료로 라이브 검증 대기
 

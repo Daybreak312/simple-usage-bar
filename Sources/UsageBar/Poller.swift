@@ -21,6 +21,13 @@ final class Poller: ObservableObject {
     private let active = ActiveAccountStore.shared
     private let history = UsageHistoryStore.shared
     private let feed = ClaudeEventFeed.shared
+    private let ledger = UsageLedger.shared
+    /// Last time the usage ledger scan started (once a minute at most).
+    private var lastLedgerScan: Date?
+    private var ledgerScanRunning = false
+    /// When the usage ledger last finished a scan that added something —
+    /// views showing ledger data refresh on change.
+    @Published var ledgerUpdatedAt: Date?
     /// Last daily rotation/retention pass over the wrapper logs.
     private var lastLogMaintenance: Date?
     private var loopTask: Task<Void, Never>?
@@ -49,6 +56,7 @@ final class Poller: ObservableObject {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 self?.reloadActive()
                 await self?.ingestWrapperEvents()
+                self?.scanLedgerIfDue()
                 await self?.refreshDue()
             }
         }
@@ -213,6 +221,44 @@ final class Poller: ObservableObject {
         }
         if changed { fireThresholdAlerts() }
         reloadActive()
+    }
+
+    // MARK: - Usage ledger (session logs → tokens / API 환산 비용)
+
+    /// Minimum gap between scan starts. With the 15 s tick this lands on a
+    /// scan every 60 s (PRD: 1분 이내).
+    static let ledgerInterval: TimeInterval = 45
+
+    /// Kick off one background ledger scan (and the daily price-table
+    /// refresh) when due. The scan does blocking file and SQLite I/O, so it
+    /// runs on a GCD utility queue — never on the main thread or the Swift
+    /// concurrency pool; the tick never waits on it.
+    func scanLedgerIfDue(now: Date = Date()) {
+        guard !ledgerScanRunning,
+              lastLedgerScan.map({ now.timeIntervalSince($0) >= Self.ledgerInterval }) ?? true else { return }
+        lastLedgerScan = now
+        ledgerScanRunning = true
+        let hashes = tokenHashes(states.map(\.account))
+        let ledger = self.ledger
+        Task { [weak self] in
+            let added: Bool = await withCheckedContinuation { done in
+                DispatchQueue.global(qos: .utility).async {
+                    do {
+                        done.resume(returning: try ledger.ingest(hashes: hashes).counted > 0)
+                    } catch {
+                        FileHandle.standardError.write(Data("사용량 장부 집계 실패: \(error.localizedDescription)\n".utf8))
+                        done.resume(returning: false)
+                    }
+                }
+            }
+            let repriced = await ModelPriceSource.shared.refreshIfStale()
+            self?.ledgerScanFinished(changed: added || repriced)
+        }
+    }
+
+    private func ledgerScanFinished(changed: Bool) {
+        ledgerScanRunning = false
+        if changed || ledgerUpdatedAt == nil { ledgerUpdatedAt = Date() }
     }
 
     /// tokenHash → 1-year-token account, for launches that ran with a

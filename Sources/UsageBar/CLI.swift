@@ -6,10 +6,11 @@ import Foundation
 ///   usagebar add-claude-token --label <email> — 1-year token from stdin
 ///   usagebar add-codex <auth.json path | -> — import a codex auth.json
 ///   usagebar remove <uuid-prefix>      — remove an account
+///   usagebar stats [--days N] …        — usage ledger (tokens + API 환산 비용)
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-claude-token", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "parse-codex", "help", "--help"]
+        return ["check", "list", "add-claude", "add-claude-token", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "parse-codex", "stats", "help", "--help"]
             .contains(args[1])
     }
 
@@ -69,6 +70,9 @@ enum CLI {
 
         case "add-claude-token":
             return await addClaudeToken(args, store: store)
+
+        case "stats":
+            return StatsCommand.run(args, store: store)
 
         case "add-codex":
             do {
@@ -358,6 +362,8 @@ enum CLI {
           usagebar priority <email|uuid접두어> <1-9>  롤링 우선순위 (낮을수록 우선)
           usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
           usagebar webhook slack|discord <url> | clear | show | test
+          usagebar stats [--days N] [--account <email>] [--json] [--refresh]
+                                  일별·계정별·모델별 토큰과 API 환산 비용 (기본 7일, --refresh = 지금 집계)
           usagebar parse-codex     wham/usage JSON(stdin) 파싱 결과 확인 (디버그)
           usagebar observe-claude --launch <id> --dir <경로>
                                   usagebar-claude 내부용 — claude stdout 통과·이벤트 기록
