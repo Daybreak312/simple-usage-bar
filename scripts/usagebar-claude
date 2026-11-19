@@ -6,6 +6,8 @@
 #  2. 호출자가 CLAUDE_CODE_OAUTH_TOKEN을 안 넣었으면 활성 계정 파일
 #     (~/Library/Application Support/UsageBar/claude/active: 1줄 계정 id, 2줄 토큰)의
 #     1년 토큰을 넣는다. 파일이 없거나 형식이 틀리면 주입 없이 진행(키체인 로그인).
+#     래퍼가 넣은 토큰이 자손 프로세스로 상속된 경우(USAGEBAR_CLAUDE_INJECTED_HASH 표시가
+#     토큰 해시와 같음)는 호출자 토큰으로 보지 않고 활성 계정을 다시 읽는다 — 롤링이 자손에도 닿게.
 #  3. 세션 id를 확정한다 (--session-id / --resume / --continue, 없으면 주입).
 #  4. 실행 기록 한 줄을 claude/launches.jsonl에 남긴다 (토큰 원문 없음 — SHA-256 앞 16자리만).
 #  5. exec로 claude가 이 프로세스(PID)를 이어받는다 — 신호·종료 코드가 그대로 전달.
@@ -141,19 +143,6 @@ ub_read_active() {  # active 파일 → UB_ACTIVE_ID / UB_ACTIVE_TOKEN. 형식�
     UB_ACTIVE_ID="$id"; UB_ACTIVE_TOKEN="$tok"
 }
 
-ub_read_active
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    # 호출자 토큰 우선 — 활성 계정의 토큰과 같으면 그 계정으로 기록.
-    [ -n "$UB_ACTIVE_TOKEN" ] && [ "$CLAUDE_CODE_OAUTH_TOKEN" = "$UB_ACTIVE_TOKEN" ] && UB_ACCOUNT_ID="$UB_ACTIVE_ID"
-elif [ -n "$UB_ACTIVE_TOKEN" ] && [ $UB_MODE != subcommand ]; then
-    # 하위 명령(setup-token·mcp·update …)에는 넣지 않는다 — 로그인 흐름 등과 섞이지 않게.
-    export CLAUDE_CODE_OAUTH_TOKEN="$UB_ACTIVE_TOKEN"
-    # 토큰보다 우선하는 인증이 섞이지 않게.
-    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
-    UB_ACCOUNT_ID="$UB_ACTIVE_ID"
-fi
-unset UB_ACTIVE_TOKEN
-
 ub_token_hash() {  # SHA-256(토큰) 앞 16자리. 토큰은 파이프(stdin)로만 — argv에 안 나온다.
     local h=""
     [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || return 1
@@ -167,7 +156,40 @@ ub_token_hash() {  # SHA-256(토큰) 앞 16자리. 토큰은 파이프(stdin)로
     [[ "$h" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s' "${h:0:16}"
 }
+
+# 상속된 토큰 판별: 래퍼가 넣은 토큰은 claude의 Bash 도구·tmux·dev-loop 등 자손 프로세스에
+# 그대로 상속된다. 그걸 "호출자가 고른 토큰"으로 보면 롤링 뒤에도 자손의 claude 호출이 옛 계정에
+# 묶인다. 그래서 주입할 때 토큰 해시(비밀 아님)를 USAGEBAR_CLAUDE_INJECTED_HASH로 함께 내보내고,
+# 지금 토큰의 해시가 그 표시와 같으면 래퍼가 넣은 것 → 없던 것으로 보고 활성 계정을 다시 읽는다.
+# 표시가 없거나 해시가 다르면 호출자가 직접 고른 토큰이다(그대로 둔다).
+UB_INHERITED_MARK="${USAGEBAR_CLAUDE_INJECTED_HASH:-}"
+unset USAGEBAR_CLAUDE_INJECTED_HASH
+if [ -n "$UB_INHERITED_MARK" ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] \
+    && [ "$(ub_token_hash)" = "$UB_INHERITED_MARK" ]; then
+    unset CLAUDE_CODE_OAUTH_TOKEN
+fi
+unset UB_INHERITED_MARK
+
+ub_read_active
+UB_INJECTED=0
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    # 호출자 토큰 우선 — 활성 계정의 토큰과 같으면 그 계정으로 기록.
+    [ -n "$UB_ACTIVE_TOKEN" ] && [ "$CLAUDE_CODE_OAUTH_TOKEN" = "$UB_ACTIVE_TOKEN" ] && UB_ACCOUNT_ID="$UB_ACTIVE_ID"
+elif [ -n "$UB_ACTIVE_TOKEN" ] && [ $UB_MODE != subcommand ]; then
+    # 하위 명령(setup-token·mcp·update …)에는 넣지 않는다 — 로그인 흐름 등과 섞이지 않게.
+    export CLAUDE_CODE_OAUTH_TOKEN="$UB_ACTIVE_TOKEN"
+    # 토큰보다 우선하는 인증이 섞이지 않게.
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+    UB_ACCOUNT_ID="$UB_ACTIVE_ID"
+    UB_INJECTED=1
+fi
+unset UB_ACTIVE_TOKEN
+
 UB_TOKEN_HASH="$(ub_token_hash)"
+# 해시를 못 구하면 표시도 없다 — 자손은 호출자 토큰으로 취급(이전 동작)될 뿐 실행은 그대로.
+if [ $UB_INJECTED = 1 ] && [ -n "$UB_TOKEN_HASH" ]; then
+    export USAGEBAR_CLAUDE_INJECTED_HASH="$UB_TOKEN_HASH"
+fi
 
 # ─── 세션 id ───
 ub_project_dir() {  # Claude Code 프로젝트 기록 디렉터리: cwd의 영숫자 외 문자(글자 단위)를 '-'로.

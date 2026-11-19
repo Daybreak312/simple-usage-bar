@@ -46,10 +46,12 @@ cat > "$FAKE" <<'EOF'
     echo "apikey=${ANTHROPIC_API_KEY-<unset>}"
     echo "authtoken=${ANTHROPIC_AUTH_TOKEN-<unset>}"
     echo "obsacct=${USAGEBAR_ACCOUNT_ID-<unset>}"
+    echo "mark=${USAGEBAR_CLAUDE_INJECTED_HASH-<unset>}"
     for a in "$@"; do echo "arg=$a"; done
 } > "${FAKE_REPORT:-/dev/null}"
 [ -n "${FAKE_STDIN_TO:-}" ] && cat > "$FAKE_STDIN_TO"
 [ -n "${FAKE_OUT:-}" ] && cat "$FAKE_OUT"
+[ -n "${FAKE_NEST_CMD:-}" ] && /bin/bash -c "$FAKE_NEST_CMD"
 [ "${FAKE_SELF_KILL:-}" = "1" ] && kill -9 $$
 exit "${FAKE_EXIT:-0}"
 EOF
@@ -64,7 +66,7 @@ reset_data() { rm -rf "$DATA"; rm -f "$REPORT"; }
 
 # run_w <래퍼 인자…> — 표준 시험 환경으로 래퍼 실행 (stdout은 파이프로 받아 관측기 종료까지 기다림)
 run_w() {
-    env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$HOMEDIR" \
+    env -u CLAUDE_CODE_OAUTH_TOKEN -u USAGEBAR_CLAUDE_INJECTED_HASH HOME="$HOMEDIR" \
         USAGEBAR_CLAUDE_REAL_BIN="$FAKE" USAGEBAR_CLAUDE_DIR="$DATA" \
         USAGEBAR_OBSERVER_BIN="${OBS_OVERRIDE:-$OBSERVER}" FAKE_REPORT="$REPORT" \
         ANTHROPIC_API_KEY="sk-api-should-be-unset" ANTHROPIC_AUTH_TOKEN="auth-should-be-unset" \
@@ -135,6 +137,49 @@ eq "호출자 토큰 tokenHash" "$(jget "$L" tokenHash)" "$CALLER_HASH"
 reset_data; write_active "$ACC" "$TOKEN"
 EXTRA_ENV="CLAUDE_CODE_OAUTH_TOKEN=$TOKEN" run_w -p hi >/dev/null
 eq "호출자 토큰 = 활성 토큰 → accountId 기록" "$(jget "$(last_launch)" accountId)" "$ACC"
+
+reset_data; write_active "$ACC" "$TOKEN"; run_w -p hi >/dev/null
+eq "주입 시 상속 표시(토큰 해시) export" "$(rep mark)" "$TOKEN_HASH"
+reset_data; write_active "$ACC" "$TOKEN"
+EXTRA_ENV="CLAUDE_CODE_OAUTH_TOKEN=$CALLER_TOKEN" run_w -p hi >/dev/null
+eq "호출자 토큰이면 상속 표시 없음" "$(rep mark)" "<unset>"
+
+# 상속된 토큰: 래퍼가 넣은 토큰이 자손으로 상속된 경우 — 롤링 뒤 중첩 호출은 새 활성 계정을 써야 한다.
+ACC2="0A1B2C3D-0000-4000-8000-00000000000B"
+TOKEN2="sk-ant-oat01-test-token-CCCC"
+TOKEN2_HASH="$(hash16 "$TOKEN2")"
+reset_data; write_active "$ACC2" "$TOKEN2"
+EXTRA_ENV="CLAUDE_CODE_OAUTH_TOKEN=$TOKEN USAGEBAR_CLAUDE_INJECTED_HASH=$TOKEN_HASH" run_w -p hi >/dev/null
+L="$(last_launch)"
+eq "상속 토큰(표시 일치) → 새 활성 토큰으로 재주입" "$(rep token)" "$TOKEN2"
+eq "상속 토큰 재주입 → accountId = 새 활성 계정" "$(jget "$L" accountId)" "$ACC2"
+eq "상속 토큰 재주입 → tokenHash = 새 토큰" "$(jget "$L" tokenHash)" "$TOKEN2_HASH"
+eq "상속 토큰 재주입 → 표시도 새 토큰 해시" "$(rep mark)" "$TOKEN2_HASH"
+eq "상속 토큰 재주입 → API 키 unset" "$(rep apikey)" "<unset>"
+
+reset_data; write_active "$ACC2" "$TOKEN2"
+EXTRA_ENV="CLAUDE_CODE_OAUTH_TOKEN=$CALLER_TOKEN USAGEBAR_CLAUDE_INJECTED_HASH=$TOKEN_HASH" run_w -p hi >/dev/null
+eq "표시와 해시 다름 → 호출자 토큰 유지" "$(rep token)" "$CALLER_TOKEN"
+eq "표시와 해시 다름 → 옛 표시 제거" "$(rep mark)" "<unset>"
+
+reset_data
+EXTRA_ENV="CLAUDE_CODE_OAUTH_TOKEN=$TOKEN USAGEBAR_CLAUDE_INJECTED_HASH=$TOKEN_HASH" run_w -p hi >/dev/null; rc=$?
+L="$(last_launch)"
+eq "상속 토큰 + active 없음 → 실행" "$rc" "0"
+eq "상속 토큰 + active 없음 → 토큰 걷음(새 호출과 같게 키체인)" "$(rep token)/$(rep mark)" "<unset>/<unset>"
+eq "상속 토큰 + active 없음 → accountId·tokenHash null" "$(jget "$L" accountId)/$(jget "$L" tokenHash)" "null/null"
+
+reset_data; write_active "$ACC2" "$TOKEN2"
+EXTRA_ENV="CLAUDE_CODE_OAUTH_TOKEN=$TOKEN USAGEBAR_CLAUDE_INJECTED_HASH=$TOKEN_HASH" run_w mcp list >/dev/null
+eq "상속 토큰 + 하위 명령 → 토큰 걷음, 주입 없음" "$(rep token)/$(rep mark)" "<unset>/<unset>"
+
+# 실제 중첩: 바깥 래퍼가 A를 넣고, 그 claude(가짜) 안에서 롤링(active → B) 뒤 래퍼를 다시 부른다.
+reset_data; write_active "$ACC" "$TOKEN"; rm -f "$T/report2"
+NEST="printf '%s\\n%s\\n' '$ACC2' '$TOKEN2' > '$DATA/active'; FAKE_NEST_CMD= FAKE_REPORT='$T/report2' /bin/bash '$WRAPPER' -p inner < /dev/null | cat"
+EXTRA_ENV="" FAKE_NEST_CMD="$NEST" run_w -p outer >/dev/null
+eq "중첩: 바깥 호출은 A" "$(rep token)" "$TOKEN"
+eq "중첩: 롤링 뒤 안쪽 호출은 B" "$(sed -n 's/^token=//p' "$T/report2" | head -1)" "$TOKEN2"
+eq "중첩: 안쪽 기록 accountId = B" "$(jget "$(last_launch)" accountId)" "$ACC2"
 
 reset_data
 run_w -p hi >/dev/null; rc=$?
@@ -254,7 +299,7 @@ eq "제어문자 \\u0001 이스케이프 왕복" "$(last_launch | python3 -I -c 
 
 # 기록 실패 무시: 데이터 디렉터리를 만들 수 없는 경로
 touch "$T/notadir"
-out="$(env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$HOMEDIR" USAGEBAR_CLAUDE_REAL_BIN="$FAKE" \
+out="$(env -u CLAUDE_CODE_OAUTH_TOKEN -u USAGEBAR_CLAUDE_INJECTED_HASH HOME="$HOMEDIR" USAGEBAR_CLAUDE_REAL_BIN="$FAKE" \
     USAGEBAR_CLAUDE_DIR="$T/notadir/claude" USAGEBAR_OBSERVER_BIN="$OBSERVER" FAKE_REPORT="$REPORT" \
     /bin/bash "$WRAPPER" -p hi 2>&1 </dev/null)"; rc=$?
 eq "기록 불가 디렉터리 → claude 정상 실행·잡음 없음" "$rc/$out" "0/"
@@ -362,7 +407,7 @@ done
 for m in "-p --output-format stream-json hi" "--model opus"; do
     reset_data
     # shellcheck disable=SC2086
-    env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$HOMEDIR" USAGEBAR_CLAUDE_REAL_BIN="$FAKE" USAGEBAR_CLAUDE_DIR="$DATA" \
+    env -u CLAUDE_CODE_OAUTH_TOKEN -u USAGEBAR_CLAUDE_INJECTED_HASH HOME="$HOMEDIR" USAGEBAR_CLAUDE_REAL_BIN="$FAKE" USAGEBAR_CLAUDE_DIR="$DATA" \
         USAGEBAR_OBSERVER_BIN="$OBSERVER" FAKE_REPORT="$REPORT" /bin/bash "$WRAPPER" $m </dev/null >/dev/null &
     wpid=$!; wait $wpid
     eq "PID 유지(exec) [$m]" "$(rep pid)" "$wpid"
@@ -386,7 +431,7 @@ inst
 eq "재설치: 맞는 링크는 그대로(같은 inode)" "$(stat -f '%i' "$LD/usagebar-claude")" "$INODE1"
 check "재설치: 파일은 rename으로 교체(새 inode)" test "$(stat -f '%i' "$SB/usagebar-claude")" != "$W1"
 reset_data; write_active "$ACC" "$TOKEN"
-env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$HOMEDIR" USAGEBAR_CLAUDE_REAL_BIN="$FAKE" USAGEBAR_CLAUDE_DIR="$DATA" \
+env -u CLAUDE_CODE_OAUTH_TOKEN -u USAGEBAR_CLAUDE_INJECTED_HASH HOME="$HOMEDIR" USAGEBAR_CLAUDE_REAL_BIN="$FAKE" USAGEBAR_CLAUDE_DIR="$DATA" \
     USAGEBAR_OBSERVER_BIN="$SB/usagebar" FAKE_REPORT="$REPORT" FAKE_OUT="$STREAM" \
     "$LD/usagebar-claude" -p --output-format stream-json hi </dev/null | cat > "$T/out.bin"
 check "링크로 실행 → 설치된 관측기 경유 통과" bash -c "cmp -s '$STREAM' '$T/out.bin' && test -s '$DATA/events.jsonl'"

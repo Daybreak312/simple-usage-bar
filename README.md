@@ -100,6 +100,10 @@ claude 호출이 깨진다 — 래퍼는 관측기를 이 고정 경로로만 �
    `usagebar-claude`는 건너뛴다. 못 찾으면 stderr 한 줄 + exit 127.
 2. 토큰: 호출자가 `CLAUDE_CODE_OAUTH_TOKEN`을 넣었으면 그대로. 아니면 활성 계정 파일의
    토큰을 넣고 `ANTHROPIC_API_KEY`·`ANTHROPIC_AUTH_TOKEN`을 unset. 하위 명령에는 넣지 않는다.
+   주입할 때 토큰 해시(비밀 아님)를 `USAGEBAR_CLAUDE_INJECTED_HASH`로 함께 내보낸다. 넣은
+   토큰은 claude의 Bash 도구·tmux·dev-loop 같은 자손 프로세스에 상속되므로, 중첩 호출에서
+   토큰 해시가 이 표시와 같으면 호출자 토큰이 아니라 상속된 것으로 보고 활성 계정을 다시
+   읽는다 — 롤링 뒤 자손 호출도 새 계정으로 간다(활성 파일이 없으면 상속 토큰을 걷고 키체인).
 3. 세션 id: `--session-id X`/`=X` → X(arg), `--resume X`/`-r X`/`--resume=X` → X(resume,
    UUID일 때만 — 값 없는 피커·검색어는 null), `--continue`/`-c` → cwd의 Claude 프로젝트
    기록 디렉터리(`~/.claude/projects/<cwd의 영숫자 외 문자를 '-'로>/`)에서 가장 최근
