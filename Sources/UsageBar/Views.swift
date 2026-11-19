@@ -34,7 +34,7 @@ struct MenuView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
             } else {
-                ForEach(poller.visibleStates) { state in
+                ForEach(poller.states) { state in
                     AccountRow(state: state)
                 }
             }
@@ -133,6 +133,16 @@ struct AccountRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
+                if isActive {
+                    Text("사용 중")
+                        .font(.system(size: 9, weight: .semibold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.green.opacity(0.18), in: Capsule())
+                        .foregroundStyle(.green)
+                        .help("활성 계정 — usagebar-claude로 실행하는 claude가 이 계정의 1년 토큰을 씁니다")
+                }
+
                 if let note = state.staleNote {
                     Text("(\(note))")
                         .font(.caption2)
@@ -147,7 +157,7 @@ struct AccountRow: View {
                         .help("메뉴바에 이 계정 표시 중")
                 }
 
-                if !hovering, state.account.priority != 1 {
+                if !hovering, state.account.isClaudeToken, state.account.priority != 1 {
                     Text("P\(state.account.priority)")
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         .padding(.horizontal, 4)
@@ -168,7 +178,7 @@ struct AccountRow: View {
                 }
 
                 if hovering {
-                    if state.account.provider == .claude && state.account.kind == .storedToken {
+                    if state.account.isClaudeToken {
                         Menu {
                             ForEach(1...5, id: \.self) { p in
                                 Button {
@@ -211,7 +221,7 @@ struct AccountRow: View {
                         .buttonStyle(.borderless)
                         .foregroundStyle(confirmingSwitch ? .orange : .secondary)
                         .disabled(switching)
-                        .help("이 계정으로 Claude Code 로그인 전환 (자동 롤링이 켜져 있으면 한도 임박 시 다시 교체될 수 있음)")
+                        .help("이 계정을 활성 계정으로 전환 — 다음 claude 실행부터 적용 (자동 롤링이 켜져 있으면 한도 임박 시 다시 교체될 수 있음)")
                     }
 
                     Button {
@@ -228,8 +238,12 @@ struct AccountRow: View {
                         : "메뉴바에 이 계정 퍼센트 표시")
 
                     Button {
+                        // 활성 계정을 지우면 그 토큰이 active 파일에 남지 않게.
+                        ActiveAccountStore.shared.clear(ifActive: state.account.id)
+                        DetailWindowController.shared.close(accountId: state.account.id)
                         try? AccountStore.shared.remove(id: state.account.id)
                         poller.reloadAccounts()
+                        poller.reloadActive()
                     } label: {
                         Image(systemName: "trash")
                             .font(.system(size: 10))
@@ -237,16 +251,37 @@ struct AccountRow: View {
                     .buttonStyle(.borderless)
                     .help("계정 제거")
                 }
+
+                // 항상 보이는 「자세히」 — 호버 컨트롤이 왼쪽에 나타나도 자리가
+                // 바뀌지 않게 맨 끝에 둔다. 1년 토큰 계정만 (레거시·Codex 없음).
+                if state.account.isClaudeToken {
+                    Button {
+                        DetailWindowController.shared.show(state.account, poller: poller)
+                    } label: {
+                        Image(systemName: "chart.xyaxis.line")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("자세히")
+                }
             }
 
-            if let error = state.lastError {
+            if state.account.needsReregistration {
+                Text("\(Account.reregistrationNotice) — 계정 추가에서 `claude setup-token` 토큰으로 다시 등록한 뒤 이 행을 지워 주세요")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let error = state.lastError {
                 Text(error)
                     .font(.caption2)
                     .foregroundStyle(.red)
                     .lineLimit(2)
             } else if let snap = state.snapshot {
                 HStack(spacing: 12) {
-                    UsageGauge(title: "5h", usage: snap.fiveHour)
+                    // Claude Ultra 플랜은 5h 한도가 없다 — 헤더가 없으면 게이지 숨김.
+                    if !(state.account.provider == .claude && snap.fiveHour == nil) {
+                        UsageGauge(title: "5h", usage: snap.fiveHour)
+                    }
                     UsageGauge(title: "7d", usage: snap.sevenDay)
                 }
                 if !snap.details.isEmpty {
@@ -267,59 +302,24 @@ struct AccountRow: View {
         }
     }
 
-    /// 우선순위는 항상 "그 이메일의 저장 행"에 산다 — 로컬 행은 프록시.
-    /// 활성 계정이 바뀌어도 우선순위가 계정을 따라가게 하기 위함.
-    private var priorityStoredRow: AccountState? {
-        if state.account.kind == .storedToken { return state }
-        return poller.states.first {
-            $0.account.provider == .claude && $0.account.kind == .storedToken
-                && $0.account.email.caseInsensitiveCompare(state.account.email) == .orderedSame
-        }
-    }
+    private var isActive: Bool { poller.activeAccountId == state.account.id }
 
-    private var displayPriority: Int { priorityStoredRow?.account.priority ?? 1 }
-
-    private func setPriority(_ p: Int) {
-        let store = AccountStore.shared
-        var targetId = priorityStoredRow?.account.id
-        if targetId == nil {
-            // 저장 행이 아직 없는 로컬 계정: 자리표시 행 생성. 활성 동안은
-            // 섀도 처리로 숨고, 롤아웃 시 harvest가 토큰을 채운다.
-            let placeholder = Account(
-                provider: .claude, kind: .storedToken, label: state.account.email)
-            try? store.add(placeholder, secrets: AccountSecrets())
-            targetId = placeholder.id
-        }
-        if let targetId {
-            try? store.updatePriority(for: targetId, p == 1 ? nil : p)
-        }
-        poller.reloadAccounts()
-    }
-
-    /// 전환 버튼 노출 조건: Claude 저장 계정 + 로컬 행(전환 추적 주체) 존재.
-    /// 섀도잉 덕에 화면에 보이는 저장 행은 곧 "현재 비활성" 계정이다.
+    /// 전환 버튼 노출 조건: 활성 아닌 1년 토큰 계정 + 마지막 조회 정상
+    /// (폐기된 토큰을 활성 파일에 쓰면 모든 claude 실행이 실패한다).
     private var canSwitchTo: Bool {
-        state.account.provider == .claude
-            && state.account.kind == .storedToken
-            && poller.states.contains {
-                $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
-            }
+        state.account.isClaudeToken && !isActive && state.lastError == nil
     }
 
     private func switchToThis() async {
         switching = true
         confirmingSwitch = false
         defer { switching = false }
-        let local = poller.states.first {
-            $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
-        }
+        let from = poller.states.first { $0.account.id == poller.activeAccountId }?.account
         do {
             try await RollingEngine.roll(
-                to: state.account, states: poller.visibleStates,
-                store: AccountStore.shared,
-                reason: "수동 전환", from: local?.account.email)
-            poller.reloadAccounts()
-            await poller.refreshAll()
+                to: state.account, from: from, states: poller.states,
+                store: AccountStore.shared, reason: "수동 전환")
+            poller.reloadActive()
         } catch {
             LocalNotifier.send(title: "[!] 계정 전환 실패", body: error.localizedDescription)
         }
@@ -389,21 +389,15 @@ struct AddAccountView: View {
     @EnvironmentObject var poller: Poller
     let onDone: () -> Void
 
-    enum ClaudeMode: String, CaseIterable, Identifiable {
-        case oauth = "OAuth 로그인 (권장)"
-        case paste = "토큰 직접 입력"
-        var id: String { rawValue }
-    }
-
     @State private var providerChoice: Provider = .claude
-    @State private var claudeMode: ClaudeMode = .oauth
-    @State private var oauthSession: ClaudeOAuth.Session?
-    @State private var oauthCode = ""
     @State private var pasted = ""
     @State private var manualLabel = ""
     @State private var busy = false
     @State private var errorText: String?
     @State private var infoText: String?
+    /// 같은 조직 id가 이미 등록돼 있다는 경고를 보여준 입력 — 같은 입력으로
+    /// 한 번 더 누르면 그대로 추가한다.
+    @State private var confirmedDuplicate: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -427,67 +421,32 @@ struct AddAccountView: View {
             .labelsHidden()
 
             if providerChoice == .claude {
-                Picker("방식", selection: $claudeMode) {
-                    ForEach(ClaudeMode.allCases) { m in
-                        Text(m.rawValue).tag(m)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
-
-            if providerChoice == .claude && claudeMode == .oauth {
-                Text("1) 아래 버튼으로 로그인 페이지를 열고 **등록할 계정으로** 승인해 주세요\n2) 다른 계정이면 ‘URL 복사’ 후 시크릿 창에서 진행해 주세요\n3) 승인 후 화면에 뜨는 코드를 아래에 붙여넣어 주세요")
+                Text("1년 토큰 — 터미널에서 `claude setup-token`을 실행해 나온 토큰을 붙여넣으세요(1년 유효). 이 토큰으로는 이메일을 조회할 수 없어 라벨(이메일)을 직접 입력해야 합니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack {
-                    Button("브라우저에서 로그인 열기") {
-                        let session = ClaudeOAuth.begin()
-                        oauthSession = session
-                        NSWorkspace.shared.open(session.url)
-                    }
-                    Button("URL 복사") {
-                        let session = ClaudeOAuth.begin()
-                        oauthSession = session
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(session.url.absoluteString, forType: .string)
-                    }
-                }
-                .disabled(busy)
-
-                TextField("승인 코드 (code#state 형태)", text: $oauthCode)
+                SecureField("sk-ant-oat01-…", text: $pasted)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11, design: .monospaced))
+
+                TextField("라벨 (필수 — 계정 이메일)", text: $manualLabel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
             } else {
-                Group {
-                    if providerChoice == .claude {
-                        Text("sk-ant-oat01-… 토큰을 붙여넣어 주세요. 주의: setup-token 토큰은 usage 조회 스코프(user:profile)가 없어 등록되지 않습니다 — OAuth 로그인을 사용해 주세요. (로컬 감지는 이 맥의 Claude Code 로그인을 재사용합니다)")
-                    } else {
-                        Text("그 계정으로 로그인된 ~/.codex/auth.json 내용 전체를 붙여넣어 주세요. 원본 머신에서 codex를 계속 쓰려면 `CODEX_HOME=/tmp/cx codex login`으로 만든 새 세션을 사용해 주세요 (토큰 계보 충돌 방지).")
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                Text("그 계정으로 로그인된 ~/.codex/auth.json 내용 전체를 붙여넣어 주세요. 원본 머신에서 codex를 계속 쓰려면 `CODEX_HOME=/tmp/cx codex login`으로 만든 새 세션을 사용해 주세요 (토큰 계보 충돌 방지).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 TextEditor(text: $pasted)
                     .font(.system(size: 11, design: .monospaced))
-                    .frame(height: providerChoice == .claude ? 54 : 110)
+                    .frame(height: 110)
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(.quaternary))
-            }
 
-            TextField("라벨 (선택 — 이메일 자동 조회 실패 시 여기 입력한 값 사용)", text: $manualLabel)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11))
-
-            if providerChoice == .claude && claudeMode == .paste {
-                Button("로컬 Claude Code 계정 자동 감지") {
-                    Task { await addLocalClaude() }
-                }
-                .font(.caption)
-                .disabled(busy)
+                TextField("라벨 (선택 — 이메일 자동 조회 실패 시 여기 입력한 값 사용)", text: $manualLabel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
             }
 
             if let infoText {
@@ -510,82 +469,85 @@ struct AddAccountView: View {
                 .disabled(busy || primaryInputEmpty)
             }
         }
+        .onChange(of: providerChoice) {
+            pasted = ""
+            errorText = nil
+            infoText = nil
+            confirmedDuplicate = nil
+        }
     }
 
     private var primaryInputEmpty: Bool {
-        if providerChoice == .claude && claudeMode == .oauth {
-            return oauthCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let input = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+        if providerChoice == .claude {
+            return input.isEmpty || manualLabel.trimmingCharacters(in: .whitespaces).isEmpty
         }
-        return pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return input.isEmpty
     }
 
-    /// Validation order matters: usage first (the thing we actually need),
-    /// then profile only to prettify the label.
     private func add() async {
         busy = true
         defer { busy = false }
         errorText = nil
         infoText = nil
         do {
-            var secrets: AccountSecrets
-            var oauthEmail: String?
             switch providerChoice {
-            case .claude where claudeMode == .oauth:
-                guard let session = oauthSession else {
-                    errorText = "먼저 ‘브라우저에서 로그인 열기’ 또는 ‘URL 복사’로 로그인을 시작해 주세요 (코드는 그 세션과 짝이어야 합니다)"
-                    return
-                }
-                (secrets, oauthEmail) = try await ClaudeOAuth.exchange(
-                    pasted: oauthCode, session: session)
-            case .claude:
-                secrets = AccountSecrets(
-                    accessToken: pasted.trimmingCharacters(in: .whitespacesAndNewlines))
-            case .codex:
-                secrets = try CodexProvider.secretsFromAuthJSON(pasted)
+            case .claude: try await addClaude()
+            case .codex: try await addCodex()
             }
-
-            let p = provider(for: providerChoice)
-            let (_, updatedSecrets) = try await p.probe(secrets: secrets)
-            secrets = updatedSecrets
-            if let oauthEmail, manualLabel.isEmpty { manualLabel = oauthEmail }
-
-            var label = manualLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-            if label.isEmpty {
-                if let resolved = try? await p.resolveLabel(secrets: secrets) {
-                    label = resolved
-                } else {
-                    infoText = "usage 조회는 성공했습니다. 다만 이 토큰엔 프로필 권한이 없어 이메일을 가져오지 못했습니다 — 라벨을 직접 입력하고 다시 ‘추가’를 눌러 주세요."
-                    return
-                }
-            }
-
-            let account = Account(provider: providerChoice, kind: .storedToken, label: label)
-            try AccountStore.shared.add(account, secrets: secrets)
-            poller.reloadAccounts()
-            onDone()
-            await poller.refreshAll()
         } catch {
             errorText = error.localizedDescription
         }
     }
 
-    private func addLocalClaude() async {
-        busy = true
-        defer { busy = false }
-        errorText = nil
-        infoText = nil
-        do {
-            let token = try ClaudeProvider.readLocalCLIToken()
-            let label = (try? await ClaudeProvider()
-                .resolveLabel(secrets: AccountSecrets(accessToken: token))) ?? "로컬 Claude Code"
-            let account = Account(provider: .claude, kind: .localClaudeCLI, label: "\(label) (로컬)")
-            try AccountStore.shared.add(account, secrets: AccountSecrets())
-            poller.reloadAccounts()
-            onDone()
-            await poller.refreshAll()
-        } catch {
-            errorText = error.localizedDescription
+    /// 탐침으로 검증(200 또는 한도 거절 429) → 조직 id 중복 경고 → 저장.
+    private func addClaude() async throws {
+        guard let token = ClaudeProvider.normalizeToken(pasted) else {
+            errorText = "토큰 형식이 아닙니다 (공백·줄바꿈 없이 한 줄로 붙여넣어 주세요)"
+            return
         }
+        let label = manualLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let existing = AccountStore.shared.loadAccounts()
+        if let dup = ClaudeRegistration.duplicateToken(token, in: existing, store: .shared) {
+            errorText = "이미 등록된 토큰입니다 (\(dup.label))"
+            return
+        }
+        let secrets = AccountSecrets(accessToken: token)
+        let (snapshot, _) = try await ClaudeProvider().probe(secrets: secrets)
+        let dups = ClaudeRegistration.sameOrganization(snapshot.organizationId, in: existing)
+        if !dups.isEmpty, confirmedDuplicate != token {
+            confirmedDuplicate = token
+            infoText = "같은 조직(계정)의 토큰이 이미 등록돼 있습니다: \(dups.map(\.label).joined(separator: ", ")). 같은 계정을 두 번 등록하면 롤링이 의미가 없습니다 — 그래도 추가하려면 ‘추가’를 한 번 더 눌러 주세요."
+            return
+        }
+        let account = Account(
+            provider: .claude, kind: .setupToken, label: label,
+            organizationId: snapshot.organizationId)
+        try AccountStore.shared.add(account, secrets: secrets)
+        poller.reloadAccounts()
+        onDone()
+        await poller.refreshAll()
+    }
+
+    private func addCodex() async throws {
+        var secrets = try CodexProvider.secretsFromAuthJSON(pasted)
+        let p = CodexProvider()
+        let (_, updatedSecrets) = try await p.probe(secrets: secrets)
+        secrets = updatedSecrets
+        var label = manualLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if label.isEmpty {
+            if let resolved = try? await p.resolveLabel(secrets: secrets) {
+                label = resolved
+            } else {
+                infoText = "usage 조회는 성공했습니다. 다만 이메일을 가져오지 못했습니다 — 라벨을 직접 입력하고 다시 ‘추가’를 눌러 주세요."
+                return
+            }
+        }
+        let account = Account(provider: .codex, kind: .storedToken, label: label)
+        try AccountStore.shared.add(account, secrets: secrets)
+        poller.reloadAccounts()
+        onDone()
+        await poller.refreshAll()
     }
 }
 
@@ -650,11 +612,11 @@ struct SettingsView: View {
                     try? SettingsStore.shared.save(s)
                 }
             )) {
-                Text("Claude 계정 자동 롤링 — 5h/7d/모델 주간 중 하나가 95% 이상이면 다음 계정으로 교체")
+                Text("Claude 계정 자동 롤링 — 활성 계정의 7d(5h 한도가 있으면 5h 포함)가 95% 이상이면 다음 계정으로 교체")
                     .font(.caption)
             }
             .toggleStyle(.checkbox)
-            Text("주의: 이 맥의 Claude Code 로그인 자체가 바뀝니다 (claude CLI를 쓰는 모든 도구에 적용). 교체 전 기존 계정의 토큰은 앱에 자동 보존됩니다.")
+            Text("활성 계정 파일만 바꿉니다 — usagebar-claude를 거치는 claude 실행에 다음 실행부터 적용되며, 키체인 로그인은 건드리지 않습니다.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

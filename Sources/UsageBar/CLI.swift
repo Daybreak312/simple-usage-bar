@@ -3,14 +3,14 @@ import Foundation
 /// Headless commands so the whole pipeline is testable without the GUI:
 ///   usagebar check                     — fetch all accounts, print a table
 ///   usagebar list                      — list registered accounts
-///   usagebar add-claude                — token from stdin (claude setup-token)
-///   usagebar add-claude --from-local-cli — piggyback on local Claude Code login
+///   usagebar add-claude-token --label <email> — 1-year token from stdin
 ///   usagebar add-codex <auth.json path | -> — import a codex auth.json
 ///   usagebar remove <uuid-prefix>      — remove an account
+///   usagebar stats [--days N] …        — usage ledger (tokens + API 환산 비용)
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "parse-codex", "help", "--help"]
+        return ["check", "list", "add-claude", "add-claude-token", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "parse-codex", "stats", "help", "--help"]
             .contains(args[1])
     }
 
@@ -22,19 +22,12 @@ enum CLI {
             return 0
 
         case "list":
-            let accounts = store.loadAccounts()
-            for a in accounts {
-                // 로컬 행의 우선순위는 그 이메일의 저장 행 값을 프록시로 표시.
-                var shown = a.priority
-                if a.kind == .localClaudeCLI,
-                   let stored = accounts.first(where: {
-                       $0.provider == .claude && $0.kind == .storedToken
-                           && $0.email.caseInsensitiveCompare(a.email) == .orderedSame
-                   }) {
-                    shown = stored.priority
-                }
-                let prio = shown == 1 ? "" : "  [P\(shown)]"
-                print("\(a.id.uuidString.prefix(8))  \(a.provider.displayName.padding(toLength: 7, withPad: " ", startingAt: 0))  \(a.kind.rawValue.padding(toLength: 15, withPad: " ", startingAt: 0))  \(a.label)\(prio)")
+            let active = ActiveAccountStore.shared.read()?.accountId
+            for a in store.loadAccounts() {
+                let prio = a.priority == 1 ? "" : "  [P\(a.priority)]"
+                let mark = a.id == active ? "  * 사용 중"
+                    : a.needsReregistration ? "  (\(Account.reregistrationNotice))" : ""
+                print("\(a.id.uuidString.prefix(8))  \(a.provider.displayName.padding(toLength: 7, withPad: " ", startingAt: 0))  \(a.kind.rawValue.padding(toLength: 15, withPad: " ", startingAt: 0))  \(a.label)\(prio)\(mark)")
             }
             return 0
 
@@ -49,34 +42,18 @@ enum CLI {
                 $0.id.uuidString.lowercased().hasPrefix(key)
                     || $0.email.lowercased() == key
             }
-            // 같은 이메일의 로컬 행 + 저장 행이 함께 걸리면 저장 행이 대상.
+            // 같은 이메일의 레거시 행 + 1년 토큰 행이 함께 걸리면 1년 토큰 행이 대상.
             if matches.count > 1 {
-                let stored = matches.filter { $0.kind == .storedToken }
-                if stored.count == 1 { matches = stored }
+                let tokens = matches.filter(\.isClaudeToken)
+                if tokens.count == 1 { matches = tokens }
             }
             guard matches.count == 1 else {
                 print(matches.isEmpty ? "일치하는 계정 없음" : "대상이 모호함 (\(matches.count)개 일치)")
                 return 1
             }
             do {
-                var target = matches[0]
-                if target.kind == .localClaudeCLI {
-                    // 우선순위는 계정(이메일)에 속한다 — 로컬 행 지정 시 그
-                    // 이메일의 저장 행으로 넘기고, 없으면 자리표시 행 생성.
-                    if let stored = store.loadAccounts().first(where: {
-                        $0.provider == .claude && $0.kind == .storedToken
-                            && $0.email.caseInsensitiveCompare(target.email) == .orderedSame
-                    }) {
-                        target = stored
-                    } else {
-                        let placeholder = Account(
-                            provider: .claude, kind: .storedToken, label: target.email)
-                        try store.add(placeholder, secrets: AccountSecrets())
-                        target = placeholder
-                    }
-                }
-                try store.updatePriority(for: target.id, p == 1 ? nil : p)
-                print("우선순위 변경: \(target.label) → \(p)")
+                try store.updatePriority(for: matches[0].id, p == 1 ? nil : p)
+                print("우선순위 변경: \(matches[0].label) → \(p)")
                 return 0
             } catch {
                 print("실패: \(error.localizedDescription)")
@@ -84,58 +61,18 @@ enum CLI {
             }
 
         case "add-claude":
-            do {
-                if args.contains("--from-local-cli") {
-                    let token = try ClaudeProvider.readLocalCLIToken()
-                    let email = try await ClaudeProvider()
-                        .resolveLabel(secrets: AccountSecrets(accessToken: token))
-                    let account = Account(provider: .claude, kind: .localClaudeCLI, label: "\(email) (로컬)")
-                    try store.add(account, secrets: AccountSecrets())
-                    print("추가됨: Claude \(account.label) [로컬 keychain 연동]")
-                } else if args.contains("--oauth") {
-                    let session = ClaudeOAuth.begin()
-                    print("아래 URL을 브라우저에서 열어 등록할 계정으로 승인해 주세요 (다른 계정은 시크릿 창):")
-                    print(session.url.absoluteString)
-                    FileHandle.standardError.write(Data("\n승인 코드 (code#state): ".utf8))
-                    guard let code = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines),
-                          !code.isEmpty else {
-                        print("코드가 비어 있음"); return 1
-                    }
-                    let (initial, email) = try await ClaudeOAuth.exchange(pasted: code, session: session)
-                    let (_, secrets) = try await ClaudeProvider().probe(secrets: initial)
-                    var label = value(of: "--label", in: args) ?? email
-                    if label == nil {
-                        label = try? await ClaudeProvider().resolveLabel(secrets: secrets)
-                    }
-                    let account = Account(
-                        provider: .claude, kind: .storedToken, label: label ?? "claude")
-                    try store.add(account, secrets: secrets)
-                    print("추가됨: Claude \(account.label)")
-                } else {
-                    FileHandle.standardError.write(Data("sk-ant-oat01-… 토큰 입력 후 엔터: ".utf8))
-                    guard let token = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines),
-                          !token.isEmpty else {
-                        print("토큰이 비어 있음"); return 1
-                    }
-                    let secrets = AccountSecrets(accessToken: token)
-                    // usage 스코프 검증이 먼저 — setup-token은 profile 스코프가 없을 수 있음.
-                    _ = try await ClaudeProvider().probe(secrets: secrets)
-                    var label = value(of: "--label", in: args)
-                    if label == nil {
-                        label = try? await ClaudeProvider().resolveLabel(secrets: secrets)
-                    }
-                    if label == nil {
-                        print("usage 조회 성공. 프로필 권한이 없는 토큰이라 이메일 자동 조회 불가 — --label <이메일>로 다시 실행해 주세요")
-                        return 1
-                    }
-                    let account = Account(provider: .claude, kind: .storedToken, label: label!)
-                    try store.add(account, secrets: secrets)
-                    print("추가됨: Claude \(label!)")
-                }
-                return 0
-            } catch {
-                print("실패: \(error.localizedDescription)"); return 1
-            }
+            print("""
+            'add-claude'(OAuth·로컬 CLI 등록)는 제거되었습니다. 1년 토큰으로 등록해 주세요:
+              claude setup-token                                   # 1년 유효 토큰 발급
+              usagebar add-claude-token --label <이메일> < 토큰파일   # 또는 실행 후 붙여넣기
+            """)
+            return 1
+
+        case "add-claude-token":
+            return await addClaudeToken(args, store: store)
+
+        case "stats":
+            return StatsCommand.run(args, store: store)
 
         case "add-codex":
             do {
@@ -167,6 +104,8 @@ enum CLI {
                 return 1
             }
             do {
+                // 활성 계정을 지우면 그 토큰이 active 파일에 남지 않게.
+                ActiveAccountStore.shared.clear(ifActive: matches[0].id)
                 try store.remove(id: matches[0].id)
                 print("제거됨: \(matches[0].label)")
                 return 0
@@ -223,59 +162,57 @@ enum CLI {
         case "check":
             let (board, failed) = await fetchBoard(store)
             guard !board.isEmpty else {
-                print("등록된 계정 없음 — usagebar add-claude / add-codex로 먼저 등록해 주세요")
+                print("등록된 계정 없음 — usagebar add-claude-token / add-codex로 먼저 등록해 주세요")
                 return 1
             }
-            print(TUIFormat.board(visible(board)))
+            print(TUIFormat.board(board))
             return failed ? 2 : 0
 
         case "roll":
-            // Claude Code 키체인 로그인을 다른 등록 계정으로 교체.
+            // 활성 계정 파일(usagebar-claude가 쓰는 토큰)을 다른 1년 토큰 계정으로 교체.
             //   usagebar roll [--to <email>] [--dry-run]
             // --to 없이 실행하면 자동 롤링과 같은 후보 선정 로직을 따른다.
             let (board, _) = await fetchBoard(store)
-            guard let local = board.first(where: {
-                $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
-            }) else {
-                print("로컬 Claude Code 계정 행이 없음 — 팝오버의 '로컬 자동 감지'로 먼저 등록해 주세요")
-                return 1
-            }
-            let active = local.account.email
+            let activeId = ActiveAccountStore.shared.read()?.accountId
+            let current = board.first { $0.account.id == activeId && $0.account.isClaudeToken }
             let target: AccountState?
             if let to = value(of: "--to", in: args) {
-                guard let found = board.first(where: {
-                    $0.account.provider == .claude && $0.account.kind == .storedToken
+                let found = board.filter {
+                    $0.account.isClaudeToken
                         && $0.account.email.caseInsensitiveCompare(to) == .orderedSame
-                }) else {
-                    print("'\(to)' 계정이 등록돼 있지 않음 (usagebar list로 확인)")
+                }
+                guard let first = found.first else {
+                    print("'\(to)' 1년 토큰 계정이 등록돼 있지 않음 (usagebar list로 확인)")
                     return 1
                 }
-                if found.account.email.caseInsensitiveCompare(active) == .orderedSame {
+                if first.account.id == current?.account.id {
                     print("'\(to)'는 이미 활성 계정")
                     return 1
                 }
-                target = found
+                if let error = first.lastError {
+                    print("'\(to)' 조회 실패 상태라 전환하지 않음: \(error)")
+                    return 1
+                }
+                target = first
             } else {
-                target = await RollingEngine.candidates(
-                    states: board, activeEmail: active, store: store).first
+                target = RollingPolicy.candidates(states: board, activeId: current?.account.id).first
             }
             guard let target else {
-                print("교체할 후보 없음 — 전 계정 지표 \(Int(RollingEngine.threshold))% 이상이거나 리프레시 토큰 미보유")
+                print("교체할 후보 없음 — 다른 1년 토큰 계정이 없거나 전부 지표 \(Int(RollingPolicy.threshold))% 이상·조회 실패")
                 return 1
             }
-            let localTrip = await RollingEngine.tripName(local.snapshot)
-            let targetTrip = await RollingEngine.tripName(target.snapshot)
-            print("활성: \(active) [\(localTrip)] → 대상: \(target.account.email) [\(targetTrip)]")
+            let currentTrip = RollingPolicy.tripName(current?.snapshot)
+            let targetTrip = RollingPolicy.tripName(target.snapshot)
+            print("활성: \(current?.account.email ?? "(없음)") [\(currentTrip)] → 대상: \(target.account.email) [\(targetTrip)]")
             if args.contains("--dry-run") {
                 print("(dry-run — 변경 없음)")
                 return 0
             }
             do {
                 try await RollingEngine.roll(
-                    to: target.account, states: visible(board), store: store,
-                    reason: "수동 (\(localTrip))", from: active)
-                print("교체 완료 — Claude Code 활성 계정: \(target.account.email)")
-                print("GUI 앱이 떠 있으면 다음 폴링에서 자동 반영됨")
+                    to: target.account, from: current?.account, states: board, store: store,
+                    reason: "수동 (\(currentTrip))")
+                print("교체 완료 — 활성 계정: \(target.account.email) (다음 usagebar-claude 실행부터 적용)")
                 return 0
             } catch {
                 print("실패: \(error.localizedDescription)")
@@ -312,7 +249,7 @@ enum CLI {
                 guard !settings.isEmpty else { print("웹훅 URL 미등록"); return 1 }
                 let (board, _) = await fetchBoard(store)
                 let results = await AlertSender.send(
-                    header: "[!] 웹훅 테스트 - SimpleUsageBar", states: visible(board))
+                    header: "[!] 웹훅 테스트 - SimpleUsageBar", states: board)
                 var ok = true
                 for (target, code) in results {
                     let good = (200...299).contains(code)
@@ -340,32 +277,68 @@ enum CLI {
         url.isEmpty ? "(없음)" : "\(url.prefix(45))…"
     }
 
-    /// Poller.isShadowed와 같은 규칙: 로컬 로그인과 중복되는 저장 행은 숨김.
-    private static func visible(_ board: [AccountState]) -> [AccountState] {
-        guard let local = board.first(where: {
-            $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
-        }) else { return board }
-        return board.filter {
-            !($0.account.provider == .claude && $0.account.kind == .storedToken
-                && $0.account.email.caseInsensitiveCompare(local.account.email) == .orderedSame)
+    /// `usagebar add-claude-token --label <email> [--allow-duplicate]` — the
+    /// token comes from stdin (argv is visible in `ps`). Probe-validated
+    /// before saving; never echoed.
+    static func addClaudeToken(_ args: [String], store: AccountStore) async -> Int32 {
+        guard let label = value(of: "--label", in: args)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else {
+            print("사용법: usagebar add-claude-token --label <이메일>   (토큰은 stdin — `claude setup-token`으로 발급)")
+            return 1
+        }
+        let raw: String
+        if isatty(fileno(stdin)) != 0 {
+            FileHandle.standardError.write(Data("claude setup-token 토큰(sk-ant-oat01-…) 붙여넣고 엔터: ".utf8))
+            raw = readLine() ?? ""
+        } else {
+            raw = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        }
+        guard let token = ClaudeProvider.normalizeToken(raw) else {
+            print("토큰이 비었거나 형식이 아님 (공백·줄바꿈 없는 한 줄)")
+            return 1
+        }
+        let existing = store.loadAccounts()
+        if let dup = ClaudeRegistration.duplicateToken(token, in: existing, store: store) {
+            print("이미 등록된 토큰: \(dup.label)")
+            return 1
+        }
+        do {
+            let secrets = AccountSecrets(accessToken: token)
+            let (snapshot, _) = try await ClaudeProvider().probe(secrets: secrets)
+            let dups = ClaudeRegistration.sameOrganization(snapshot.organizationId, in: existing)
+            if !dups.isEmpty, !args.contains("--allow-duplicate") {
+                print("같은 조직(계정)의 토큰이 이미 등록됨: \(dups.map(\.label).joined(separator: ", ")) — 그래도 추가하려면 --allow-duplicate")
+                return 1
+            }
+            let account = Account(
+                provider: .claude, kind: .setupToken, label: label,
+                organizationId: snapshot.organizationId)
+            try store.add(account, secrets: secrets)
+            var state = AccountState(account: account)
+            state.snapshot = snapshot
+            print("추가됨: Claude \(label)")
+            print(TUIFormat.board([state]))
+            return 0
+        } catch {
+            print("실패: \(error.localizedDescription)")
+            return 1
         }
     }
 
     /// Fetch every account's usage into displayable states (CLI check / webhook test).
+    /// Legacy Claude rows are listed without fetching.
     private static func fetchBoard(_ store: AccountStore) async -> ([AccountState], Bool) {
         var board: [AccountState] = []
         var failed = false
         for account in store.loadAccounts() {
             var state = AccountState(account: account)
+            if account.needsReregistration {
+                board.append(state)
+                continue
+            }
             do {
-                let snapshot = try await provider(for: account.provider)
+                state.snapshot = try await provider(for: account.provider)
                     .fetchUsage(account: account, store: store)
-                state.snapshot = snapshot
-                // Display the identity seen on this fetch; persisting it is
-                // the GUI poller's job (single writer for accounts.json).
-                if let resolved = snapshot.resolvedLabel {
-                    state.account.label = resolved
-                }
             } catch {
                 state.lastError = error.localizedDescription
                 failed = true
@@ -381,13 +354,18 @@ enum CLI {
     GUI:  usagebar                (메뉴바 아이콘으로 실행)
     CLI:  usagebar check          현재 등록된 모든 계정의 사용량 출력
           usagebar list           계정 목록
-          usagebar add-claude [--oauth | --from-local-cli] [--label <이메일>]
+          usagebar add-claude-token --label <이메일> [--allow-duplicate]
+                                  1년 토큰(claude setup-token) 등록 — 토큰은 stdin
           usagebar add-codex <auth.json | ->
           usagebar remove <uuid-prefix>
-          usagebar roll [--to <email>] [--dry-run]   Claude Code 로그인 교체
+          usagebar roll [--to <email>] [--dry-run]   활성 Claude 계정(usagebar-claude 토큰) 교체
           usagebar priority <email|uuid접두어> <1-9>  롤링 우선순위 (낮을수록 우선)
           usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
           usagebar webhook slack|discord <url> | clear | show | test
+          usagebar stats [--days N] [--account <email>] [--json] [--refresh]
+                                  일별·계정별·모델별 토큰과 API 환산 비용 (기본 7일, --refresh = 지금 집계)
           usagebar parse-codex     wham/usage JSON(stdin) 파싱 결과 확인 (디버그)
+          usagebar observe-claude --launch <id> --dir <경로>
+                                  usagebar-claude 내부용 — claude stdout 통과·이벤트 기록
     """
 }
