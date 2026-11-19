@@ -23,7 +23,8 @@ final class UsageLedgerTests: XCTestCase {
     }
 
     func makeLedger() -> UsageLedger {
-        UsageLedger(directory: claudeDir, projectsRoot: projects, timeZone: kst, now: { [now] in now })
+        UsageLedger(directory: claudeDir, projectsRoot: projects, timeZone: kst, now: { [now] in now },
+                    prices: { ModelPriceSource.bundledTable })
     }
 
     // MARK: - Fixtures
@@ -394,7 +395,8 @@ final class UsageLedgerTests: XCTestCase {
         try makeLedger().ingest(hashes: [:])
         // 401 days later the row is gone.
         let later = now.addingTimeInterval(401 * 86_400)
-        let future = UsageLedger(directory: claudeDir, projectsRoot: projects, timeZone: kst, now: { later })
+        let future = UsageLedger(directory: claudeDir, projectsRoot: projects, timeZone: kst, now: { later },
+                                 prices: { ModelPriceSource.bundledTable })
         try future.ingest(hashes: [:])
         XCTAssertTrue(rows(future, from: "2000-01-01", to: "2100-01-01").isEmpty)
     }
@@ -424,6 +426,90 @@ final class UsageLedgerTests: XCTestCase {
         }
         XCTAssertEqual(SessionLogParser.parseTimestamp("2026-11-19T03:21:58Z"), Dates.fromISO("2026-11-19T03:21:58Z"))
         XCTAssertNil(SessionLogParser.parseTimestamp("yesterday"))
+    }
+
+    // MARK: - Long-context tier (PRD Phase 5)
+
+    /// T1 (62,834 prompt) and T2 (342,655 prompt) on the same day and model:
+    /// judged per request → two rows, cost = sum of the CLI values.
+    func testLongContextJudgedPerRequestAndSummed() throws {
+        launch("2026-11-19T00:00:00.000Z", session: s1, account: accountA)
+        write([
+            assistant(session: s1, ts: "2026-11-19T01:00:00.000Z", mid: "t1", model: "claude-haiku-5-5",
+                      input: 2, output: 4, cacheRead: 10_480, c1: 52_352),
+            assistant(session: s1, ts: "2026-11-19T01:01:00.000Z", mid: "t2", model: "claude-haiku-5-5",
+                      input: 2, output: 4, cacheRead: 13_049, c1: 329_604),
+        ], file: sessionFile(s1))
+        let ledger = makeLedger()
+        XCTAssertEqual(try ledger.ingest(hashes: [:]).counted, 2)
+        let got = rows(ledger)
+        XCTAssertEqual(got.map(\.tier), [0, 100_000])
+        XCTAssertEqual(Set(got.map(\.day)), ["2026-11-19"])
+        let report = LedgerReport(rows: got, table: ModelPriceSource.bundledTable)
+        XCTAssertEqual(report.total.cost, 0.0105774 + 0.33026745, accuracy: 1e-9)
+        XCTAssertEqual(report.total.tokens.messages, 2)
+        XCTAssertEqual(report.total.longContextTokens.messages, 1)
+        XCTAssertEqual(report.total.longContextTokens.totalTokens, 2 + 4 + 13_049 + 329_604)
+        XCTAssertEqual(report.accounts.first?.models.count, 1)  // tiers merged per model on display
+    }
+
+    func testLongContextWithFastMultiplier() throws {
+        var haiku = try XCTUnwrap(ModelPriceSource.bundledTable.lookup("claude-haiku-5-5")?.price)
+        haiku.multipliers["fast"] = 2
+        let table = ModelPriceTable(prices: ["claude-haiku-5-5": haiku])
+        launch("2026-11-19T00:00:00.000Z", session: s1, account: accountA)
+        write([
+            assistant(session: s1, ts: "2026-11-19T01:00:00.000Z", mid: "t2", model: "claude-haiku-5-5",
+                      input: 2, output: 4, cacheRead: 13_049, c1: 329_604, speed: "fast"),
+            assistant(session: s1, ts: "2026-11-19T01:01:00.000Z", mid: "t2b", model: "claude-haiku-5-5",
+                      input: 2, output: 4, cacheRead: 13_049, c1: 329_604),
+        ], file: sessionFile(s1))
+        let ledger = UsageLedger(directory: claudeDir, projectsRoot: projects, timeZone: kst,
+                                 now: { [now] in now }, prices: { table })
+        XCTAssertEqual(try ledger.ingest(hashes: [:]).counted, 2)
+        let got = rows(ledger)
+        XCTAssertEqual(got.count, 2)
+        XCTAssertTrue(got.allSatisfy { $0.tier == 100_000 })
+        XCTAssertEqual(LedgerReport(rows: got, table: table).total.cost, 0.33026745 * 3, accuracy: 1e-9)
+    }
+
+    /// A ledger written by a development build before the tier column opens
+    /// without crashing and is rebuilt from the session logs.
+    func testPreTierLedgerFileIsRebuilt() throws {
+        launch("2026-11-19T00:00:00.000Z", session: s1, account: accountA)
+        write([assistant(session: s1, ts: "2026-11-19T01:00:00.000Z", mid: "t2", model: "claude-haiku-5-5",
+                         input: 2, output: 4, cacheRead: 13_049, c1: 329_604)], file: sessionFile(s1))
+        let dbURL = claudeDir.appendingPathComponent("ledger.sqlite")
+        do {
+            let old = try SQLiteDB(path: dbURL.path)
+            try old.exec("""
+                PRAGMA journal_mode = WAL;
+                CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE files(path TEXT PRIMARY KEY, inode INTEGER NOT NULL, offset INTEGER NOT NULL, mtime REAL NOT NULL);
+                CREATE TABLE seen(key TEXT PRIMARY KEY, day TEXT NOT NULL) WITHOUT ROWID;
+                CREATE TABLE usage(account TEXT NOT NULL, day TEXT NOT NULL, model TEXT NOT NULL,
+                    fast INTEGER NOT NULL, us INTEGER NOT NULL,
+                    input INTEGER NOT NULL, output INTEGER NOT NULL, cache_5m INTEGER NOT NULL,
+                    cache_1h INTEGER NOT NULL, cache_read INTEGER NOT NULL, web_search INTEGER NOT NULL,
+                    messages INTEGER NOT NULL,
+                    PRIMARY KEY(account, day, model, fast, us)) WITHOUT ROWID;
+                INSERT INTO meta VALUES('schema', '1');
+                INSERT INTO meta VALUES('trackingStartedAt', '\(ms("2026-11-19T00:00:00.000Z"))');
+                INSERT INTO usage VALUES('\(accountA.uuidString)', '2026-11-19', 'claude-haiku-5-5', 0, 0, 2, 4, 0, 329604, 13049, 0, 1);
+                INSERT INTO seen VALUES('t2:req_1', '2026-11-19');
+                INSERT INTO files VALUES('\(sessionFile(s1).path)', 1, 999999, 0);
+                """)
+        }
+        // Reading first (the detail window may open before any scan): no crash, old sums gone.
+        let ledger = makeLedger()
+        XCTAssertEqual(rows(ledger), [])
+        XCTAssertEqual(ledger.trackingStartedAt(), ISO8601DateFormatter.fractional.date(from: "2026-11-19T00:00:00.000Z"))
+        // The next scan re-reads the logs into the new schema.
+        XCTAssertEqual(try ledger.ingest(hashes: [:]).counted, 1)
+        XCTAssertEqual(rows(ledger).map(\.tier), [100_000])
+        // Opening again is a no-op (already rebuilt).
+        XCTAssertEqual(try makeLedger().ingest(hashes: [:]).counted, 0)
+        XCTAssertEqual(rows(makeLedger()).count, 1)
     }
 }
 

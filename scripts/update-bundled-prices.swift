@@ -5,7 +5,8 @@
 //   swift scripts/update-bundled-prices.swift <litellm.json>  # 내려받아 둔 사본으로 생성
 //
 // 추리는 규칙은 앱의 ModelPriceTable.claudeSubset과 같다(키 `claude-…`/`anthropic/claude-…`,
-// input/output 단가가 있는 항목, 아래 필드만). 테스트가 번들 사본이 그 규칙의 고정점인지
+// input/output 단가가 있는 항목, 아래 필드 + 장문 구간 할증 키 `<기본 필드>_above_<N>k_tokens`만 —
+// `_batches` 키는 제외). 테스트가 번들 사본이 그 규칙의 고정점인지
 // (다시 추려도 같은지) 확인하므로, 규칙을 바꾸면 양쪽을 함께 고친다.
 import Foundation
 
@@ -15,6 +16,16 @@ let keptFields = [
     "cache_creation_input_token_cost", "cache_creation_input_token_cost_above_1hr",
     "cache_read_input_token_cost", "search_context_cost_per_query", "provider_specific_entry",
 ]
+// ModelPrice.tierKeyPattern과 같은 식.
+let tierKey = try! NSRegularExpression(pattern:
+    #"^(input_cost_per_token|output_cost_per_token|cache_creation_input_token_cost|cache_creation_input_token_cost_above_1hr|cache_read_input_token_cost)_above_(\d+)k_tokens$"#)
+func isKept(_ key: String) -> Bool {
+    if keptFields.contains(key) { return true }
+    let ns = key as NSString
+    guard let m = tierKey.firstMatch(in: key, range: NSRange(location: 0, length: ns.length)),
+          let k = Int64(ns.substring(with: m.range(at: 2))) else { return false }
+    return k > 0 && k < 1_000_000_000
+}
 
 func fail(_ msg: String) -> Never {
     FileHandle.standardError.write(Data("update-bundled-prices: \(msg)\n".utf8))
@@ -45,7 +56,7 @@ var subset: [String: Any] = [:]
 for (name, value) in table where name.hasPrefix("claude-") || name.hasPrefix("anthropic/claude-") {
     guard let e = value as? [String: Any],
           isPrice(e["input_cost_per_token"]), isPrice(e["output_cost_per_token"]) else { continue }
-    subset[name] = e.filter { keptFields.contains($0.key) }
+    subset[name] = e.filter { isKept($0.key) }
 }
 guard !subset.isEmpty else { fail("Claude 항목이 없음") }
 guard let json = try? JSONSerialization.data(withJSONObject: subset, options: [.sortedKeys]),

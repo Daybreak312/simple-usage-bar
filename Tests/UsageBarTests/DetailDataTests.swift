@@ -232,7 +232,7 @@ final class DetailDataTests: XCTestCase {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let ledger = UsageLedger(directory: dir, projectsRoot: dir.appendingPathComponent("projects"),
-                                 timeZone: seoul, now: { self.now })
+                                 timeZone: seoul, now: { self.now }, prices: { ModelPriceSource.bundledTable })
         let history = UsageHistoryStore(directory: dir, now: { self.now })
         let active = ActiveAccountStore(directory: dir)
         let prices = ModelPriceSource(directory: dir)

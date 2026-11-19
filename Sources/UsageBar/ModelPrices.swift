@@ -22,6 +22,10 @@ struct TokenCounts: Equatable, Codable {
     /// Every token kind (web searches and message count excluded).
     var totalTokens: Int64 { input + output + cacheWrite5m + cacheWrite1h + cacheRead }
 
+    /// Prompt size of one request — what the long-context tier is judged on:
+    /// `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.
+    var promptTokens: Int64 { input + cacheWrite5m + cacheWrite1h + cacheRead }
+
     static func + (a: TokenCounts, b: TokenCounts) -> TokenCounts {
         var s = a
         s += b
@@ -57,6 +61,38 @@ struct ModelPrice: Equatable {
     var webSearch: Double?
     /// `provider_specific_entry` multipliers, e.g. `{"us": 1.1, "fast": 2}`
     var multipliers: [String: Double]
+    /// Long-context tiers (`*_above_<N>k_tokens`), threshold ascending. Empty
+    /// for models without such keys.
+    var tiers: [LongContextTier] = []
+
+    /// Prices of one long-context tier. A request whose prompt
+    /// (`TokenCounts.promptTokens`) is **above** `threshold` pays these prices
+    /// for **all** its tokens, output included — not only the part above the
+    /// threshold (CLI `costUSD` T2 실측, PRD Phase 5 §2). nil = the table has
+    /// no tier price for that kind → fallback in `ModelPrice.cost`.
+    struct LongContextTier: Equatable {
+        var threshold: Int64
+        var input: Double?
+        var output: Double?
+        var cacheWrite5m: Double?
+        var cacheWrite1h: Double?
+        var cacheRead: Double?
+    }
+
+    /// `<base>_above_<N>k_tokens` for the five base fields. `_batches` keys
+    /// (batch API prices) don't match (anchored `$`). For
+    /// `cache_creation_input_token_cost_above_1hr_above_100k_tokens` the
+    /// alternation backtracks to the `…_above_1hr` base.
+    static let tierKeyPattern = try! NSRegularExpression(pattern:
+        #"^(input_cost_per_token|output_cost_per_token|cache_creation_input_token_cost|cache_creation_input_token_cost_above_1hr|cache_read_input_token_cost)_above_(\d+)k_tokens$"#)
+
+    /// (base field, threshold in tokens) of a tier key; nil for other keys.
+    static func parseTierKey(_ key: String) -> (base: String, threshold: Int64)? {
+        let ns = key as NSString
+        guard let m = tierKeyPattern.firstMatch(in: key, range: NSRange(location: 0, length: ns.length)),
+              let k = Int64(ns.substring(with: m.range(at: 2))), k > 0, k < 1_000_000_000 else { return nil }
+        return (ns.substring(with: m.range(at: 1)), k * 1000)
+    }
 
     /// nil when the entry has no input/output price (not a priced chat model).
     init?(litellm e: [String: Any]) {
@@ -78,10 +114,25 @@ struct ModelPrice: Equatable {
             if let d = num(v), d > 0 { m[k] = d }
         }
         multipliers = m
+        var byThreshold: [Int64: LongContextTier] = [:]
+        for (key, value) in e {
+            guard let (base, threshold) = Self.parseTierKey(key), let price = num(value) else { continue }
+            var t = byThreshold[threshold] ?? LongContextTier(threshold: threshold)
+            switch base {
+            case "input_cost_per_token": t.input = price
+            case "output_cost_per_token": t.output = price
+            case "cache_creation_input_token_cost": t.cacheWrite5m = price
+            case "cache_creation_input_token_cost_above_1hr": t.cacheWrite1h = price
+            default: t.cacheRead = price
+            }
+            byThreshold[threshold] = t
+        }
+        tiers = byThreshold.values.sorted { $0.threshold < $1.threshold }
     }
 
     init(input: Double, output: Double, cacheWrite5m: Double?, cacheWrite1h: Double?,
-         cacheRead: Double?, webSearch: Double? = nil, multipliers: [String: Double] = [:]) {
+         cacheRead: Double?, webSearch: Double? = nil, multipliers: [String: Double] = [:],
+         tiers: [LongContextTier] = []) {
         self.input = input
         self.output = output
         self.cacheWrite5m = cacheWrite5m
@@ -89,6 +140,21 @@ struct ModelPrice: Equatable {
         self.cacheRead = cacheRead
         self.webSearch = webSearch
         self.multipliers = multipliers
+        self.tiers = tiers.sorted { $0.threshold < $1.threshold }
+    }
+
+    /// Long-context threshold a request with `promptTokens` falls in: the
+    /// largest tier threshold the prompt is **above** (`>`), 0 = base prices.
+    /// The ledger stores this per request at ingest time (PRD Phase 5 §3.3).
+    func tierThreshold(promptTokens: Int64) -> Int64 {
+        tiers.last { promptTokens > $0.threshold }?.threshold ?? 0
+    }
+
+    /// The tier priced for a stored threshold: the largest tier at or below
+    /// it. Equal to the stored one unless the table changed since ingest
+    /// (a removed/raised tier → the next lower one, or base prices).
+    func tier(at threshold: Int64) -> LongContextTier? {
+        threshold > 0 ? tiers.last { $0.threshold <= threshold } : nil
     }
 
     /// API 환산 비용 (USD) of `t`. `fast` / `us` = the response's
@@ -97,14 +163,23 @@ struct ModelPrice: Equatable {
     /// nil when cache tokens were used but the table has no cache price —
     /// an unknown is never passed off as $0. Web searches without a price
     /// cost 0 (PRD: 「없으면 0」).
-    func cost(_ t: TokenCounts, fast: Bool = false, us: Bool = false) -> Double? {
+    ///
+    /// `tier` = the long-context threshold the tokens were judged in
+    /// (`tierThreshold`, stored per ledger row; 0 = base). Every kind then
+    /// uses the tier price; a kind the tier lacks uses its base price, except
+    /// the 1-hour cache write: tier 1 h → tier 5 m → base 1 h → base 5 m.
+    func cost(_ t: TokenCounts, fast: Bool = false, us: Bool = false, tier threshold: Int64 = 0) -> Double? {
         func part(_ n: Int64, _ price: Double?) -> Double? {
             n == 0 ? 0 : price.map { Double(n) * $0 }
         }
-        guard let w5 = part(t.cacheWrite5m, cacheWrite5m),
-              let w1 = part(t.cacheWrite1h, cacheWrite1h ?? cacheWrite5m),
-              let r = part(t.cacheRead, cacheRead) else { return nil }
-        var c = Double(t.input) * input + Double(t.output) * output + w5 + w1 + r
+        let tier = tier(at: threshold)
+        let w5Price = tier?.cacheWrite5m ?? cacheWrite5m
+        let w1Price = tier?.cacheWrite1h ?? tier?.cacheWrite5m ?? cacheWrite1h ?? cacheWrite5m
+        guard let w5 = part(t.cacheWrite5m, w5Price),
+              let w1 = part(t.cacheWrite1h, w1Price),
+              let r = part(t.cacheRead, tier?.cacheRead ?? cacheRead) else { return nil }
+        var c = Double(t.input) * (tier?.input ?? input) + Double(t.output) * (tier?.output ?? output)
+            + w5 + w1 + r
             + Double(t.webSearches) * (webSearch ?? 0)
         if fast, let m = multipliers["fast"] { c *= m }
         if us, let m = multipliers["us"] { c *= m }
@@ -143,12 +218,17 @@ struct ModelPriceTable {
     }
 
     /// LiteLLM fields the ledger reads — the only ones kept in the bundled
-    /// copy and the downloaded cache.
+    /// copy and the downloaded cache, plus the long-context tier keys
+    /// (`ModelPrice.parseTierKey`).
     static let keptFields = [
         "input_cost_per_token", "output_cost_per_token",
         "cache_creation_input_token_cost", "cache_creation_input_token_cost_above_1hr",
         "cache_read_input_token_cost", "search_context_cost_per_query", "provider_specific_entry",
     ]
+
+    static func isKeptField(_ key: String) -> Bool {
+        keptFields.contains(key) || ModelPrice.parseTierKey(key) != nil
+    }
 
     /// The Claude-only subset of a LiteLLM table (sorted, compact JSON).
     static func claudeSubset(_ data: Data) throws -> Data {
@@ -158,7 +238,7 @@ struct ModelPriceTable {
         var out: [String: Any] = [:]
         for (name, value) in obj where isClaudeKey(name) {
             guard let e = value as? [String: Any], ModelPrice(litellm: e) != nil else { continue }
-            out[name] = e.filter { keptFields.contains($0.key) }
+            out[name] = e.filter { isKeptField($0.key) }
         }
         guard !out.isEmpty else { throw UsageBarError.parse("단가표에 Claude 모델 단가가 없음") }
         return try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])

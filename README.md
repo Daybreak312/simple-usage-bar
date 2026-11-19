@@ -187,14 +187,31 @@ ccusage(오픈소스)와 같은 원천·단가표·중복 제거 키를 쓴다.
   (없으면 5분 단가) + 캐시 읽기×`cache_read_input_token_cost` + 웹 검색×
   `search_context_cost_per_query.search_context_size_medium`(없으면 0). 그 뒤 `usage.speed ==
   "fast"`면 `provider_specific_entry.fast`, `usage.inference_geo == "us"`면
-  `provider_specific_entry.us` 배수를 곱한다(항목에 있을 때만). 장문 구간 할증은 반영하지 않는다
-  (대상 모델 항목에 없음).
+  `provider_specific_entry.us` 배수를 곱한다(항목에 있을 때만).
+- **장문 구간 할증:** 항목에 `<기본 필드>_above_<N>k_tokens` 키가 있으면(예: `claude-haiku-5-5`의
+  `*_above_100k_tokens`) **요청 하나**의 프롬프트 합(`input_tokens` + `cache_creation_input_tokens`
+  (5분+1시간) + `cache_read_input_tokens`)이 기준 N×1000을 **넘을 때**(`>`, 정확히 100,000은 기본)
+  그 요청의 **모든 토큰 구분 — 출력까지 — 을 할증 단가**로 계산한다. 기준 초과분만 할증하는
+  방식(ccusage)이 아니다. 근거(2026-11-19 실측, claude 2.1.293): haiku-5-5 입력 2 / 출력 4 /
+  캐시 읽기 13,049 / 1시간 캐시 329,604(프롬프트 342,655) = 2×5e-7 + 4×2.5e-6 + 13,049×5e-8 +
+  329,604×1e-6 = **$0.33026745** = CLI `costUSD`(기본 단가로는 약 $0.07). 62,834 프롬프트 요청은
+  기본 단가 그대로 $0.0105774. 기준이 여러 개면 넘은 것 중 가장 큰 기준 하나를 쓰고, 할증 단가가
+  빠진 구분은 기본 단가를 쓴다(1시간 캐시는 할증 1시간 → 할증 5분 → 기본 1시간 → 기본 5분).
+  fast·us 배수는 할증 단가에 곱한다. `*_batches`(배치 API) 키는 쓰지 않는다.
+- **판정 시점:** 장문 여부는 **집계할 때** 그때의 단가표 기준으로 응답마다 판정해 장부에 구간
+  (`tier` = 기준 토큰 수, 0 = 기본)으로 따로 저장한다 — 하루치를 합친 뒤에는 어느 요청이 기준을
+  넘었는지 알 수 없기 때문이다. 단가표의 기준이 나중에 바뀌어도 **과거 판정은 다시 하지 않는다**
+  (단가 금액은 표시 시점의 표를 따른다. 저장된 기준이 표에서 사라졌으면 그 이하의 가장 큰 기준,
+  없으면 기본 단가). 단가표에 없던 모델의 응답은 기본 구간으로 저장된다. 자세히 창·`usagebar
+  stats`는 구간을 합쳐 보이고, `stats`는 계정마다 장문 응답 수·토큰을 한 줄로, `--json`은
+  `longContextTokens`·`longContextMessages`로 따로 준다.
 - 검증: haiku-4-5 응답 1건(입력 10 / 출력 891 / 캐시 읽기 17,957 / 1시간 캐시 44,247) =
   $0.0947547 = CLI `modelUsage.claude-haiku-4-5.costUSD`(단위 테스트로 고정).
 - 단가를 못 찾은 모델(또는 캐시 단가 없이 캐시 토큰이 있는 경우)은 토큰만 집계하고 「단가 미상」
   으로 표시한다 — $0으로 위장하지 않으며, 합계는 「$X + 단가 미상」이 된다.
 - 비용은 장부에 저장하지 않고 **표시할 때** 토큰 × 현재 단가로 계산한다(단가표가 갱신되면 과거
-  비용도 같은 표로 다시 계산 — fast/us 응답은 장부에서 따로 칸을 둬 배수를 나중에도 적용한다).
+  비용도 같은 표로 다시 계산 — fast/us 응답과 장문 구간 응답은 장부에서 따로 칸을 둬 배수·할증을
+  나중에도 적용한다).
 - 단가표 원천: 앱이 하루 1회 원격 표를 받아 Claude 항목만 추려 `claude/prices.json`에 캐시한다.
   실패(네트워크·HTTP·파싱·Claude 항목 없음)하면 기존 캐시 → 앱에 컴파일된 번들 사본 순으로 쓰고
   6시간 뒤 다시 시도한다. 번들 사본은 `Sources/UsageBar/BundledPrices.swift`(출처 URL·받은 날짜
@@ -277,9 +294,10 @@ PNG로 그려 보려면 `USAGEBAR_DETAIL_SNAPSHOT=/tmp/detail.png swift test --f
     라이브 파일의 첫 줄이 7일 지나면 앱이 `X.rotating.jsonl`로 rename(다음 append가 새
     라이브 파일을 만든다) → 1초 뒤 보관본에 합치고 지운다. 보관본은 하루 한 번 90일 지난
     줄을 지운다. 전체 기록은 `X.1.jsonl` → `X.rotating.jsonl` → `X.jsonl` 순서로 읽는다.
-  - `ledger.sqlite` (0600, WAL) — 사용량 장부. `usage`(계정 × 로컬 날짜 × 모델 × fast/us별 토큰
-    6구분·응답 수, 400일 보존), `seen`(중복 제거 키 `message.id:requestId`, 90일 보존), `files`(세션 기록
-    파일별 inode·오프셋), `meta`(`trackingStartedAt`). 토큰(비밀)·대화 내용·cwd는 저장하지 않는다.
+  - `ledger.sqlite` (0600, WAL) — 사용량 장부. `usage`(계정 × 로컬 날짜 × 모델 × fast/us × 장문 구간별
+    토큰 6구분·응답 수, 400일 보존), `seen`(중복 제거 키 `message.id:requestId`, 90일 보존), `files`(세션 기록
+    파일별 inode·오프셋), `meta`(`trackingStartedAt`, `schema`). 장문 구간 열이 없는 옛 장부(개발 빌드
+    산출물)를 열면 `usage`·`seen`·`files`를 비우고 다음 집계가 세션 기록에서 다시 쌓는다(추적 시작은 유지). 토큰(비밀)·대화 내용·cwd는 저장하지 않는다.
   - `prices.json` — LiteLLM 단가표의 Claude 부분 캐시(하루 1회 갱신)
 - `~/Library/Application Support/UsageBar/bin/` (0700) — `usagebar-claude` 래퍼와 관측기
   실행 파일 사본 (`make-app.sh --install`이 갱신)
@@ -339,9 +357,12 @@ content-type: application/json
   `server_tool_use.{web_search_requests, web_fetch_requests}`, `speed`(`standard`/`fast`),
   `inference_geo`(`global`/`us`/`not_available` …), `service_tier`.
 - LiteLLM 단가표(F8)에 `claude-opus-5-5`·`claude-fable-5-1`·`claude-sonnet-5`·`claude-sonnet-5-5`·
-  `claude-haiku-4-5`(+`-20251001`)·`claude-opus-4-8` 등이 있고, 필드는 위 비용 공식의 것들
-  (opus-5-5 `provider_specific_entry` = `{"us":1.1,"fast":2}`). 이 단가로 계산한 값이 CLI
-  `modelUsage.<모델>.costUSD`와 일치한다(F9).
+  `claude-haiku-4-5`(+`-20251001`)·`claude-haiku-5-5`·`claude-opus-4-8` 등이 있고, 필드는 위 비용
+  공식의 것들(opus-5-5 `provider_specific_entry` = `{"us":1.1,"fast":2}`). 이 단가로 계산한 값이 CLI
+  `modelUsage.<모델>.costUSD`와 일치한다(F9). **정정(2026-11-19):** 처음엔 「장문 구간 할증 필드는
+  없다」고 적었으나 이는 opus-5-5·fable-5-1·sonnet-5·haiku-4-5만 본 결과였다 — `claude-haiku-5-5`에는
+  `*_above_100k_tokens` 할증 키가 있고(Claude Code가 보조 작업·Explore 서브에이전트에 씀), CLI도
+  요청 전체를 할증 단가로 계산한다(위 「장문 구간 할증」, 실측 $0.33026745).
 
 ### Codex — 스펙은 codex-rs 소스 기준, 토큰 만료로 라이브 검증 대기
 

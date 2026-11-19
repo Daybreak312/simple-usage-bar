@@ -11,6 +11,9 @@ struct LedgerReport: Equatable {
     /// priced — when non-empty the cost is a lower bound, never a hidden $0.
     struct Total: Equatable {
         var tokens = TokenCounts()
+        /// The part of `tokens` from long-context requests (priced at a
+        /// long-context tier) — already included in `tokens`.
+        var longContextTokens = TokenCounts()
         var cost: Double = 0
         var unpricedModels: Set<String> = []
 
@@ -18,6 +21,7 @@ struct LedgerReport: Equatable {
 
         static func += (a: inout Total, b: Total) {
             a.tokens += b.tokens
+            a.longContextTokens += b.longContextTokens
             a.cost += b.cost
             a.unpricedModels.formUnion(b.unpricedModels)
         }
@@ -50,11 +54,11 @@ struct LedgerReport: Equatable {
     /// Price one row (nil = model not in the table, or cache tokens without a
     /// cache price).
     static func cost(_ row: LedgerRow, table: ModelPriceTable) -> Double? {
-        table.lookup(row.model)?.price.cost(row.tokens, fast: row.fast, us: row.us)
+        table.lookup(row.model)?.price.cost(row.tokens, fast: row.fast, us: row.us, tier: row.tier)
     }
 
     static func total(_ row: LedgerRow, table: ModelPriceTable) -> Total {
-        var t = Total(tokens: row.tokens)
+        var t = Total(tokens: row.tokens, longContextTokens: row.tier > 0 ? row.tokens : TokenCounts())
         if let c = cost(row, table: table) { t.cost = c } else { t.unpricedModels = [row.model] }
         return t
     }

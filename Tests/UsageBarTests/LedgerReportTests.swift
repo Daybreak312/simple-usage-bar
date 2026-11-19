@@ -95,7 +95,8 @@ final class LedgerReportTests: XCTestCase {
         let root = makeTempDir()
         let store = AccountStore(directory: root)
         let ledger = UsageLedger(directory: root.appendingPathComponent("claude"),
-                                 projectsRoot: root.appendingPathComponent("projects"))
+                                 projectsRoot: root.appendingPathComponent("projects"),
+                                 prices: { ModelPriceSource.bundledTable })
         let code = StatsCommand.run(["usagebar", "stats", "--refresh", "--json"], store: store, ledger: ledger,
                                     prices: ModelPriceSource(directory: root))
         XCTAssertEqual(code, 0)

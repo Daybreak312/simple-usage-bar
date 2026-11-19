@@ -168,6 +168,10 @@ enum StatsCommand {
             out.append("  " + header)
             for d in a.days { out.append("  " + line(d.day, d.total)) }
             if a.days.count > 1 { out.append("  " + line("합계", a.total)) }
+            let long = a.total.longContextTokens
+            if long.messages > 0 {
+                out.append("  장문 구간(할증 단가) 응답 \(LedgerFormat.count(long.messages))건 · 토큰 \(LedgerFormat.count(long.totalTokens)) — 위 합계에 포함")
+            }
             out.append("  모델별")
             for m in a.models {
                 let share = m.costShare.map { String(format: " (%.0f%%)", $0 * 100) } ?? ""
@@ -209,6 +213,8 @@ enum StatsCommand {
                 "webSearchRequests": t.tokens.webSearches,
                 "messages": t.tokens.messages,
                 "totalTokens": t.tokens.totalTokens,
+                "longContextTokens": t.longContextTokens.totalTokens,
+                "longContextMessages": t.longContextTokens.messages,
                 "apiCostUSD": t.cost,
                 "costComplete": t.isFullyPriced,
                 "unpricedModels": t.unpricedModels.sorted(),

@@ -12,6 +12,10 @@ struct LedgerRow: Equatable {
     var fast: Bool
     /// `usage.inference_geo == "us"` responses (price multiplier `us`).
     var us: Bool
+    /// Long-context tier the responses were judged in at ingest
+    /// (`ModelPrice.tierThreshold`, tokens; 0 = base prices). Judged per
+    /// response, so a day's long and normal requests are separate rows.
+    var tier: Int64 = 0
     var tokens: TokenCounts
 }
 
@@ -34,6 +38,10 @@ struct LedgerRow: Equatable {
 ///   ignored (its launch records are gone by then too).
 /// - Only messages attributable to an account are counted; their keys are
 ///   the only ones kept.
+/// - **Long-context tier** (PRD Phase 5) is judged per response, with the
+///   price table current at ingest, and kept as a row key (`LedgerRow.tier`)
+///   — summing first would lose which request crossed the threshold. A later
+///   change of the table's thresholds doesn't re-judge stored rows.
 final class UsageLedger: @unchecked Sendable {  // state behind writeLock / readLock
     static let shared = UsageLedger()
 
@@ -48,6 +56,7 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
     let projectsRoot: URL
     let timeZone: TimeZone
     private let now: () -> Date
+    private let prices: () -> ModelPriceTable
     private let launchLog: LaunchLog
 
     private let writeLock = NSLock()
@@ -59,11 +68,13 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
          projectsRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/projects", isDirectory: true),
          timeZone: TimeZone = .current,
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init,
+         prices: @escaping () -> ModelPriceTable = { ModelPriceSource.shared.current().table }) {
         dbURL = directory.appendingPathComponent("ledger.sqlite")
         self.projectsRoot = projectsRoot
         self.timeZone = timeZone
         self.now = now
+        self.prices = prices
         launchLog = LaunchLog(
             launches: directory.appendingPathComponent("launches.jsonl"),
             events: directory.appendingPathComponent("events.jsonl"))
@@ -128,6 +139,7 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
             let insertKey = try db.prepare("INSERT OR IGNORE INTO seen(key, day) VALUES(?, ?)")
             var sums: [CellKey: TokenCounts] = [:]
             let dayOf = DayFormatter(timeZone: timeZone)
+            let table = prices()
             for r in records {
                 guard r.timestamp >= windowStart else { report.outOfWindow += 1; continue }
                 guard let account = index.account(session: r.sessionId, at: r.timestamp, hashes: hashes) else {
@@ -137,15 +149,18 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
                 let day = dayOf.string(r.timestamp)
                 try insertKey.run([.text(r.dedupKey), .text(day)])
                 guard db.changes == 1 else { report.duplicates += 1; continue }
-                sums[CellKey(account: account, day: day, model: r.model, fast: r.fast, us: r.us), default: TokenCounts()] += r.tokens
+                // Unknown model → base tier (it is unpriced anyway).
+                let tier = table.lookup(r.model)?.price.tierThreshold(promptTokens: r.tokens.promptTokens) ?? 0
+                sums[CellKey(account: account, day: day, model: r.model, fast: r.fast, us: r.us, tier: tier),
+                     default: TokenCounts()] += r.tokens
                 report.counted += 1
             }
 
             // 3. Sums.
             let upsert = try db.prepare("""
-                INSERT INTO usage(account, day, model, fast, us, input, output, cache_5m, cache_1h, cache_read, web_search, messages)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(account, day, model, fast, us) DO UPDATE SET
+                INSERT INTO usage(account, day, model, fast, us, tier, input, output, cache_5m, cache_1h, cache_read, web_search, messages)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account, day, model, fast, us, tier) DO UPDATE SET
                   input = input + excluded.input, output = output + excluded.output,
                   cache_5m = cache_5m + excluded.cache_5m, cache_1h = cache_1h + excluded.cache_1h,
                   cache_read = cache_read + excluded.cache_read, web_search = web_search + excluded.web_search,
@@ -154,7 +169,7 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
             for (k, t) in sums {
                 try upsert.run([
                     .text(k.account.uuidString), .text(k.day), .text(k.model),
-                    .int(k.fast ? 1 : 0), .int(k.us ? 1 : 0),
+                    .int(k.fast ? 1 : 0), .int(k.us ? 1 : 0), .int(k.tier),
                     .int(t.input), .int(t.output), .int(t.cacheWrite5m), .int(t.cacheWrite1h),
                     .int(t.cacheRead), .int(t.webSearches), .int(t.messages),
                 ])
@@ -175,6 +190,7 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
         var model: String
         var fast: Bool
         var us: Bool
+        var tier: Int64
     }
 
     /// Stored tracking start, or the earliest launch (stored now). nil = no
@@ -297,7 +313,7 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
     func rows(fromDay: String, toDay: String, account: UUID? = nil) throws -> [LedgerRow] {
         try withReader { db in
             var sql = """
-                SELECT account, day, model, fast, us, input, output, cache_5m, cache_1h, cache_read, web_search, messages
+                SELECT account, day, model, fast, us, input, output, cache_5m, cache_1h, cache_read, web_search, messages, tier
                 FROM usage WHERE day >= ? AND day <= ?
                 """
             var args: [SQLiteDB.Value] = [.text(fromDay), .text(toDay)]
@@ -305,7 +321,7 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
                 sql += " AND account = ?"
                 args.append(.text(account.uuidString))
             }
-            sql += " ORDER BY day, account, model, fast, us"
+            sql += " ORDER BY day, account, model, fast, us, tier"
             return try db.prepare(sql).query(args) { r -> LedgerRow? in
                 guard let a = r.text(0).flatMap(UUID.init(uuidString:)),
                       let day = r.text(1), let model = r.text(2) else { return nil }
@@ -313,7 +329,7 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
                                     cacheWrite1h: r.int(8), cacheRead: r.int(9),
                                     webSearches: r.int(10), messages: r.int(11))
                 return LedgerRow(accountId: a, day: day, model: model,
-                                 fast: r.int(3) != 0, us: r.int(4) != 0, tokens: t)
+                                 fast: r.int(3) != 0, us: r.int(4) != 0, tier: r.int(12), tokens: t)
             }
         } ?? []
     }
@@ -332,6 +348,18 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
 
     // MARK: - Connections
 
+    /// Schema 2 = `usage.tier` (long-context tier) in the key.
+    static let schemaVersion = "2"
+
+    private static let usageTable = """
+        CREATE TABLE IF NOT EXISTS usage(account TEXT NOT NULL, day TEXT NOT NULL, model TEXT NOT NULL,
+            fast INTEGER NOT NULL, us INTEGER NOT NULL, tier INTEGER NOT NULL,
+            input INTEGER NOT NULL, output INTEGER NOT NULL, cache_5m INTEGER NOT NULL,
+            cache_1h INTEGER NOT NULL, cache_read INTEGER NOT NULL, web_search INTEGER NOT NULL,
+            messages INTEGER NOT NULL,
+            PRIMARY KEY(account, day, model, fast, us, tier)) WITHOUT ROWID;
+        """
+
     private static let schema = """
         PRAGMA journal_mode = WAL;
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -339,20 +367,39 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
             offset INTEGER NOT NULL, mtime REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS seen(key TEXT PRIMARY KEY, day TEXT NOT NULL) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS seen_day ON seen(day);
-        CREATE TABLE IF NOT EXISTS usage(account TEXT NOT NULL, day TEXT NOT NULL, model TEXT NOT NULL,
-            fast INTEGER NOT NULL, us INTEGER NOT NULL,
-            input INTEGER NOT NULL, output INTEGER NOT NULL, cache_5m INTEGER NOT NULL,
-            cache_1h INTEGER NOT NULL, cache_read INTEGER NOT NULL, web_search INTEGER NOT NULL,
-            messages INTEGER NOT NULL,
-            PRIMARY KEY(account, day, model, fast, us)) WITHOUT ROWID;
-        INSERT OR IGNORE INTO meta(key, value) VALUES('schema', '1');
+        \(usageTable)
+        INSERT OR IGNORE INTO meta(key, value) VALUES('schema', '\(schemaVersion)');
         """
+
+    /// Create the tables, or rebuild a ledger written before schema 2 (no
+    /// `usage.tier` — only development builds wrote one): its sums can't be
+    /// split by tier after the fact, so sums, dedup keys and file offsets
+    /// are dropped and the next scan re-reads the window from the session
+    /// logs. The tracking start (`meta`) stays. Checked inside a write
+    /// transaction so two processes opening an old file rebuild it once.
+    private static func prepareSchema(_ db: SQLiteDB) throws {
+        try db.exec(schema)
+        func hasTier() throws -> Bool {
+            try db.prepare("SELECT 1 FROM pragma_table_info('usage') WHERE name = 'tier'").query { _ in true }.first ?? false
+        }
+        guard try !hasTier() else { return }
+        try db.immediateTransaction {
+            guard try !hasTier() else { return }
+            try db.exec("""
+                DROP TABLE usage;
+                DELETE FROM seen;
+                DELETE FROM files;
+                \(usageTable)
+                INSERT OR REPLACE INTO meta(key, value) VALUES('schema', '\(schemaVersion)');
+                """)
+        }
+    }
 
     private func openWriter() throws -> SQLiteDB {
         if let writer { return writer }
         try AppPaths.ensurePrivateDirectory(dbURL.deletingLastPathComponent())
         let db = try SQLiteDB(path: dbURL.path, busyTimeoutMs: 30_000)
-        try db.exec(Self.schema)
+        try Self.prepareSchema(db)
         for suffix in ["", "-wal", "-shm"] {
             chmod(dbURL.path + suffix, 0o600)
         }
@@ -368,7 +415,7 @@ final class UsageLedger: @unchecked Sendable {  // state behind writeLock / read
             guard FileManager.default.fileExists(atPath: dbURL.path) else { return nil }
             // Read-write without CREATE: WAL readers need the -shm file.
             let db = try SQLiteDB(path: dbURL.path, readOnly: false, create: false)
-            try db.exec(Self.schema)  // same process may read before its first ingest
+            try Self.prepareSchema(db)  // same process may read before its first ingest
             reader = db
         }
         return try body(reader!)
