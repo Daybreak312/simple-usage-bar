@@ -7,6 +7,9 @@ final class Poller: ObservableObject {
 
     @Published var states: [AccountState] = []
     @Published var lastRefresh: Date?
+    /// Claude account in the active-account file (the one usagebar-claude
+    /// launches with). Re-read every tick so CLI `roll` shows up quickly.
+    @Published var activeAccountId: UUID?
 
     /// Per-account poll interval, flat regardless of utilization (default 3 minutes).
     var normalInterval: TimeInterval {
@@ -15,6 +18,8 @@ final class Poller: ObservableObject {
     }
 
     private let store = AccountStore.shared
+    private let active = ActiveAccountStore.shared
+    private let history = UsageHistoryStore.shared
     private var loopTask: Task<Void, Never>?
     /// Last seen utilization per account, for threshold-crossing detection.
     /// nil entry = no baseline yet (first poll after launch never alerts).
@@ -33,11 +38,13 @@ final class Poller: ObservableObject {
         pinnedAccountId = settings.menuBarAccountId.flatMap(UUID.init(uuidString:))
         menuBarWindow = settings.menuBarWindow.flatMap(MenuBarWindow.init(rawValue:)) ?? .both
         loopTask?.cancel()
+        reloadActive()
         loopTask = Task { [weak self] in
             await self?.refreshAll()
             // 15s tick; each account fires when its own due time passes.
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
+                self?.reloadActive()
                 await self?.refreshDue()
             }
         }
@@ -56,30 +63,26 @@ final class Poller: ObservableObject {
         }
     }
 
-    /// A Claude storedToken row duplicating the current local login is
-    /// "shadowed": hidden and never polled. The local row already covers that
-    /// account, and skipping its own refresh keeps the app from racing Claude
-    /// Code over the token lineage (rolling ownership protocol).
-    func isShadowed(_ state: AccountState) -> Bool {
-        guard state.account.provider == .claude, state.account.kind == .storedToken,
-              let local = states.first(where: {
-                  $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
-              }) else { return false }
-        return state.account.email.caseInsensitiveCompare(local.account.email) == .orderedSame
+    func reloadActive() {
+        let id = active.read()?.accountId
+        if id != activeAccountId { activeAccountId = id }
     }
 
-    /// Rows shown in the popover / boards — shadowed duplicates excluded.
-    var visibleStates: [AccountState] { states.filter { !isShadowed($0) } }
+    /// Legacy Claude rows (OAuth / local CLI) are listed but never polled —
+    /// they show "1년 토큰으로 재등록 필요" instead.
+    private func isPolled(_ state: AccountState) -> Bool {
+        !state.account.needsReregistration
+    }
 
     func refreshAll() async {
-        await refresh(states.filter { !isShadowed($0) })
+        await refresh(states.filter(isPolled))
     }
 
     /// Refresh accounts whose individual due time has passed.
     private func refreshDue() async {
         let now = Date()
         let due = states.filter {
-            !isShadowed($0) && (nextDue[$0.account.id] ?? .distantPast) <= now
+            isPolled($0) && (nextDue[$0.account.id] ?? .distantPast) <= now
         }
         guard !due.isEmpty else { return }
         await refresh(due)
@@ -87,7 +90,6 @@ final class Poller: ObservableObject {
 
     private func refresh(_ targets: [AccountState]) async {
         let snapshot = targets
-        var identityChanged = false
         await withTaskGroup(of: (UUID, Result<UsageSnapshot, Error>).self) { group in
             for state in snapshot {
                 group.addTask {
@@ -108,15 +110,13 @@ final class Poller: ObservableObject {
                     states[idx].snapshot = usage
                     states[idx].lastError = nil
                     states[idx].staleNote = nil
-                    // Follow the identity seen on this fetch (local-CLI login
-                    // can switch accounts anytime). Re-baseline alerts so the
-                    // switch itself never reads as a threshold crossing.
-                    if let resolved = usage.resolvedLabel,
-                       resolved != states[idx].account.label {
-                        states[idx].account.label = resolved
-                        try? store.updateLabel(for: id, resolved)
-                        prevPercents[id] = nil
-                        identityChanged = true
+                    if states[idx].account.isClaudeToken {
+                        history.record(UsageSample(accountId: id, snapshot: usage))
+                        if let org = usage.organizationId,
+                           org != states[idx].account.organizationId {
+                            states[idx].account.organizationId = org
+                            try? store.updateOrganizationId(for: id, org)
+                        }
                     }
                 case .failure(let error):
                     // 429는 일시 스로틀 — 이전 스냅샷이 있으면 그대로 두고
@@ -143,21 +143,13 @@ final class Poller: ObservableObject {
                 nextDue[id] = Date().addingTimeInterval(delay)
             }
         }
-        // Identity switch (manual /login or a roll) may have created/retired
-        // rows on disk (e.g. CLI-side harvest) — resync from the store.
-        if identityChanged { reloadAccounts() }
         lastRefresh = Date()
         fireThresholdAlerts()
 
-        if await RollingEngine.evaluate(states: visibleStates, store: store) {
-            // Rolled: pick up harvested rows and re-read the keychain identity
-            // right away. The follow-up refresh can't roll again (cooldown).
-            reloadAccounts()
-            let locals = states.filter {
-                $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
-            }
-            if !locals.isEmpty { await refresh(locals) }
-        }
+        // Rolling only swaps the active-account file; every account keeps its
+        // own poll, so no follow-up refresh is needed.
+        _ = await RollingEngine.evaluate(states: states, store: store)
+        reloadActive()
     }
 
     /// Compare against the previous poll and push webhook alerts for every
@@ -165,12 +157,7 @@ final class Poller: ObservableObject {
     /// next climb re-alerts naturally.
     private func fireThresholdAlerts() {
         var alerts: [(header: String, state: AccountState)] = []
-        for state in states where isShadowed(state) {
-            // Drop stale baselines so un-shadowing later starts fresh instead
-            // of "crossing" thresholds against months-old numbers.
-            prevPercents.removeValue(forKey: state.account.id)
-        }
-        for state in states where !isShadowed(state) {
+        for state in states where isPolled(state) {
             guard state.lastError == nil, let snap = state.snapshot else { continue }
             let newFive = snap.fiveHour?.percent
             let newSeven = snap.sevenDay?.percent
@@ -188,16 +175,17 @@ final class Poller: ObservableObject {
 
         // Native notification: always, webhook과 동일 시점.
         for (header, state) in alerts {
-            let summary = [
-                TUIFormat.gauge("5h", state.snapshot?.fiveHour),
-                TUIFormat.gauge("7d", state.snapshot?.sevenDay),
-            ].joined(separator: "  ")
+            // Claude Ultra plans have no 5h window — skip the empty gauge.
+            let five = state.account.provider == .claude && state.snapshot?.fiveHour == nil
+                ? nil : TUIFormat.gauge("5h", state.snapshot?.fiveHour)
+            let summary = [five, TUIFormat.gauge("7d", state.snapshot?.sevenDay)]
+                .compactMap { $0 }.joined(separator: "  ")
             LocalNotifier.send(title: header, body: summary)
         }
 
         // Webhook: only when configured.
         guard !SettingsStore.shared.load().isEmpty else { return }
-        let board = visibleStates
+        let board = states
         let headers = alerts.map(\.header)
         Task.detached(priority: .utility) {
             for header in headers {
@@ -213,7 +201,7 @@ final class Poller: ObservableObject {
            let state = states.first(where: { $0.account.id == pinned }) {
             return (state.snapshot?.fiveHour?.percent, state.snapshot?.sevenDay?.percent)
         }
-        let visible = visibleStates
+        let visible = states.filter(isPolled)
         return (
             visible.compactMap { $0.snapshot?.fiveHour?.percent }.max(),
             visible.compactMap { $0.snapshot?.sevenDay?.percent }.max()

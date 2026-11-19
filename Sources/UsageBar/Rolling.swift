@@ -1,98 +1,42 @@
 import Foundation
 
-/// Claude 계정 자동 롤링 — 로컬 Claude Code 로그인의 한도(5h/7d/모델 주간)가
-/// 임계치(95%)에 닿으면 등록된 다음 Claude 계정으로 키체인 자격증명을 교체한다.
+/// Claude 계정 롤링의 판단 규칙 — 부작용 없는 순수 함수 (테스트 대상).
 ///
-/// 토큰 계보 소유권 프로토콜 (refresh_token_reused 사고 방지):
-/// - 활성 계정의 계보는 키체인(Claude Code)이 단독 소유한다. 앱은 로컬 행을
-///   직접 리프레시하지 않고, 같은 계정의 저장 행은 섀도 처리되어 폴링에서
-///   빠진다 (Poller.isShadowed).
-/// - 롤아웃: 키체인의 최신 아이템을 통째로 회수(harvest)해 그 계정의 저장
-///   행에 보존한 뒤에만 다음 계정을 키체인에 쓴다 — 계보 유실 불가.
-/// - 롤인: 대상 계정을 먼저 리프레시해 유효한 액세스 토큰을 확보·검증하고
-///   (교체 직후 claude 실행이 없어도 모니터링이 즉시 동작), 키체인에 쓴
-///   순간부터 그 계보의 소유권은 Claude Code로 넘어간다.
-@MainActor
-enum RollingEngine {
-    nonisolated static let threshold: Double = 95
-    nonisolated static let cooldown: TimeInterval = 10 * 60
+/// 롤링 = 활성 계정 파일(`ActiveAccountStore`) 교체. 키체인은 건드리지 않는다.
+/// 활성 계정의 지표(max(5h 있으면, 7d))가 임계치(95%)에 닿으면 우선순위 →
+/// 등록 순서로 다음 1년 토큰 계정을 고른다.
+enum RollingPolicy {
+    static let threshold: Double = 95
+    static let cooldown: TimeInterval = 10 * 60
 
-    private(set) static var lastRollAt: Date?
-    private static var notifiedExhausted = false
-
-    /// 롤링 판단 지표: max(5h, 7d, 모델 주간 최대).
+    /// 롤링 판단 지표: max(5h, 7d). 서버가 한도 거절(`rejected`)을 알린
+    /// 스냅샷은 헤더 수치와 무관하게 100으로 본다.
     static func trip(_ snap: UsageSnapshot?) -> Double? {
         guard let snap else { return nil }
-        return [snap.fiveHour?.percent, snap.sevenDay?.percent, snap.modelWeeklyMax]
-            .compactMap { $0 }.max()
+        let values = [snap.fiveHour?.percent, snap.sevenDay?.percent].compactMap { $0 }
+        if snap.isLimitRejected { return max(values.max() ?? 100, 100) }
+        return values.max()
     }
 
-    /// 지표를 사람이 읽을 형태로 ("5h 96%" 등).
+    /// 지표를 사람이 읽을 형태로 ("7d 96%", "한도 거절" 등).
     static func tripName(_ snap: UsageSnapshot?) -> String {
         guard let snap else { return "?" }
+        if snap.isLimitRejected { return "한도 거절" }
         var best: (name: String, pct: Double) = ("?", -1)
         if let p = snap.fiveHour?.percent, p > best.pct { best = ("5h", p) }
         if let p = snap.sevenDay?.percent, p > best.pct { best = ("7d", p) }
-        if let p = snap.modelWeeklyMax, p > best.pct { best = ("주간", p) }
-        return "\(best.name) \(Int(best.pct))%"
+        return best.pct < 0 ? "?" : "\(best.name) \(Int(best.pct))%"
     }
 
-    /// Poller가 매 갱신 주기 끝에 호출. 실제로 롤링했으면 true.
-    static func evaluate(states: [AccountState], store: AccountStore) async -> Bool {
-        guard SettingsStore.shared.load().autoRoll == true else { return false }
-        if let last = lastRollAt, Date().timeIntervalSince(last) < cooldown { return false }
-        guard let local = states.first(where: {
-                  $0.account.provider == .claude && $0.account.kind == .localClaudeCLI
-              }),
-              local.lastError == nil,
-              local.staleNote == nil,  // 지연된 값으로는 롤링 판단하지 않음
-              let t = trip(local.snapshot), t >= threshold else {
-            notifiedExhausted = false
-            return false
-        }
-
-        let activeEmail = local.account.email
-        guard let target = candidates(
-            states: states, activeEmail: activeEmail, store: store).first else {
-            if !notifiedExhausted {
-                notifiedExhausted = true
-                let header = "[!] 계정 롤링 불가 - 전 계정 한도 임박 (\(tripName(local.snapshot)))"
-                LocalNotifier.send(
-                    title: header,
-                    body: "등록된 모든 Claude 계정이 \(Int(threshold))% 이상입니다.")
-                if !SettingsStore.shared.load().isEmpty {
-                    _ = await AlertSender.send(header: header, states: states)
-                }
-            }
-            return false
-        }
-
-        do {
-            try await roll(to: target.account, states: states, store: store,
-                           reason: tripName(local.snapshot), from: activeEmail)
-            return true
-        } catch {
-            LocalNotifier.send(title: "[!] 계정 롤링 실패", body: error.localizedDescription)
-            return false
-        }
+    /// 마지막 조회가 정상(오류·지연 없음)이고 지표를 읽을 수 있는 상태.
+    static func isHealthy(_ s: AccountState) -> Bool {
+        s.lastError == nil && s.staleNote == nil && trip(s.snapshot) != nil
     }
 
-    /// 롤링 후보: 우선순위(낮을수록 우선) → 같은 순위면 등록 순서.
-    /// 활성 계정 제외, 리프레시 토큰 보유, 마지막 조회가 정상이며 지표가
-    /// 임계 미만인 Claude 계정만.
-    static func candidates(
-        states: [AccountState], activeEmail: String, store: AccountStore
-    ) -> [AccountState] {
+    /// 1년 토큰 계정, 우선순위(낮을수록 우선) → 등록 순서.
+    static func ranked(_ states: [AccountState]) -> [AccountState] {
         states.enumerated()
-            .filter { _, s in
-                s.account.provider == .claude
-                    && s.account.kind == .storedToken
-                    && s.account.email.caseInsensitiveCompare(activeEmail) != .orderedSame
-                    && s.lastError == nil
-                    && s.staleNote == nil
-                    && (trip(s.snapshot).map { $0 < threshold } ?? false)
-                    && store.secrets(for: s.account.id)?.refreshToken != nil
-            }
+            .filter { $0.element.account.isClaudeToken }
             .sorted { l, r in
                 l.element.account.priority != r.element.account.priority
                     ? l.element.account.priority < r.element.account.priority
@@ -101,106 +45,169 @@ enum RollingEngine {
             .map(\.element)
     }
 
-    /// 실제 교체. 순서가 곧 안전장치: 회수 → 대상 리프레시·검증 → 키체인
-    /// 쓰기 → 읽기 재검증(불일치 시 원복). 키체인은 검증이 끝나기 전엔
-    /// 건드리지 않는다.
-    static func roll(to target: Account, states: [AccountState], store: AccountStore,
-                     reason: String, from activeEmail: String?) async throws {
-        // 1) 현 활성 계보 회수. 이메일을 특정 못 하면 계보 보존이 불가능하므로
-        //    롤링 자체를 중단한다 (덮어쓰는 순간 그 계정 재로그인 필요해짐).
-        let current = try? ClaudeProvider.readLocalCLIItem()
-        if let current {
-            var email = activeEmail
-            if email == nil, let token = current.oauth["accessToken"] as? String {
-                email = try? await ClaudeProvider()
-                    .resolveLabel(secrets: AccountSecrets(accessToken: token))
-            }
-            guard let email else {
-                throw UsageBarError.invalidCredentials("활성 계정 식별 실패 — 계보 보존이 안 되므로 롤링 중단")
-            }
-            try harvest(email: email, item: current, store: store)
+    /// 롤링 후보: 활성 계정이 아닌 1년 토큰 계정 중 마지막 조회 정상·지연
+    /// 아님·지표 임계 미만. 순서 = `ranked`.
+    static func candidates(states: [AccountState], activeId: UUID?) -> [AccountState] {
+        ranked(states).filter { s in
+            s.account.id != activeId
+                && isHealthy(s)
+                && (trip(s.snapshot).map { $0 < threshold } ?? false)
+        }
+    }
+
+    enum Decision: Equatable {
+        /// 할 일 없음 — 활성 계정이 임계 미만이거나 아직 판단 불가.
+        case idle
+        /// 자동 롤링 꺼짐.
+        case disabled
+        /// 임계 도달했지만 직전 교체 후 쿨다운 중.
+        case cooldown
+        /// 유효한 활성 계정이 없음 → 이 계정을 활성으로 지정.
+        case assign(UUID)
+        /// 임계 도달 → 이 계정으로 교체.
+        case roll(from: UUID, to: UUID, reason: String)
+        /// 임계 도달했지만 후보 없음.
+        case exhausted(reason: String)
+    }
+
+    /// - Parameters:
+    ///   - activeId: 활성 계정 파일의 계정 id (없으면 nil).
+    ///   - autoRoll: 설정의 자동 롤링 스위치. 활성 지정(assign)은 이와 무관 —
+    ///     래퍼가 쓸 토큰이 있어야 하므로.
+    static func decide(
+        states: [AccountState], activeId: UUID?, autoRoll: Bool,
+        lastRollAt: Date?, now: Date
+    ) -> Decision {
+        let ranked = ranked(states)
+        guard !ranked.isEmpty else { return .idle }
+
+        guard let activeId, let active = ranked.first(where: { $0.account.id == activeId }) else {
+            // 활성 지정이 없거나, 지정된 계정이 삭제·레거시가 됨.
+            // 건강한 후보 1등, 없으면 정상 조회된 계정 중 1등. 아직 아무
+            // 계정도 조회되지 않았으면 다음 주기까지 기다린다.
+            let pick = candidates(states: states, activeId: nil).first
+                ?? ranked.first(where: isHealthy)
+            return pick.map { .assign($0.account.id) } ?? .idle
         }
 
-        // 2) 대상 리프레시(회전 즉시 영속화) + 사용량 엔드포인트로 실검증.
-        guard var secrets = store.secrets(for: target.id) else {
-            throw UsageBarError.invalidCredentials("대상 계정의 저장된 토큰 없음")
+        guard autoRoll else { return .disabled }
+        guard isHealthy(active), let t = trip(active.snapshot), t >= threshold else {
+            return .idle  // 지연·오류 값으로는 롤링 판단하지 않음
         }
-        secrets = try await ClaudeOAuth.refresh(secrets)
-        try store.updateSecrets(for: target.id, secrets)
-        _ = try await ClaudeProvider().probe(secrets: secrets)
+        if let lastRollAt, now.timeIntervalSince(lastRollAt) < cooldown { return .cooldown }
 
-        // 3) 키체인 교체 + 읽기 재검증.
-        let item = buildItem(secrets: secrets,
-                             template: secrets.claudeKeychainItem,
-                             fallbackTemplate: current?.raw)
-        try ClaudeProvider.writeLocalCLIItem(raw: item)
-        let back = try ClaudeProvider.readLocalCLIItem()
-        guard (back.oauth["accessToken"] as? String) == secrets.accessToken else {
-            if let current { try? ClaudeProvider.writeLocalCLIItem(raw: current.raw) }
-            throw UsageBarError.invalidCredentials("키체인 재확인 불일치 — 이전 상태로 원복함")
+        let reason = tripName(active.snapshot)
+        guard let target = candidates(states: states, activeId: activeId).first else {
+            return .exhausted(reason: reason)
         }
+        return .roll(from: activeId, to: target.account.id, reason: reason)
+    }
+}
 
-        lastRollAt = Date()
+/// 롤링 실행기 — 활성 계정 파일 교체 + 이력 + 알림 + 웹훅.
+@MainActor
+enum RollingEngine {
+    nonisolated static var threshold: Double { RollingPolicy.threshold }
+
+    /// 같은 프로세스 안의 마지막 교체 시각. roll-history가 쓰기 실패해도
+    /// 쿨다운이 지켜지도록 파일 기록과 함께 본다.
+    private static var lastRollAt: Date?
+    private static var notifiedExhausted = false
+
+    /// Forget in-process state (tests; process-wide statics outlive a test).
+    static func resetState() {
+        lastRollAt = nil
         notifiedExhausted = false
+    }
 
-        let header = "[>] 계정 롤링: \(activeEmail ?? "?") → \(target.email) (\(reason))"
-        LocalNotifier.send(title: header, body: "Claude Code 로그인이 교체되었습니다.")
+    /// 알림 경로 (테스트에서 교체). 기본: 네이티브 알림 / 설정된 웹훅.
+    static var notify: (_ title: String, _ body: String) -> Void = LocalNotifier.send
+    static var broadcast: (_ header: String, _ states: [AccountState]) async -> Void = { header, states in
         if !SettingsStore.shared.load().isEmpty {
             _ = await AlertSender.send(header: header, states: states)
         }
     }
 
-    /// 키체인 아이템을 해당 이메일의 저장 행으로 회수. 행이 없으면 생성 —
-    /// 이 자동 생성이 "키체인에만 존재하던 계정"의 계보 유실을 막는다.
-    static func harvest(
-        email: String, item: (raw: String, oauth: [String: Any]), store: AccountStore
-    ) throws {
-        let existing = store.loadAccounts().first {
-            $0.provider == .claude && $0.kind == .storedToken
-                && $0.email.caseInsensitiveCompare(email) == .orderedSame
-        }
-        var secrets = existing.flatMap { store.secrets(for: $0.id) } ?? AccountSecrets()
-        secrets.accessToken = item.oauth["accessToken"] as? String ?? secrets.accessToken
-        secrets.refreshToken = item.oauth["refreshToken"] as? String ?? secrets.refreshToken
-        if let ms = (item.oauth["expiresAt"] as? NSNumber)?.int64Value {
-            secrets.expiresAtMs = ms
-        }
-        secrets.scopes = item.oauth["scopes"] as? [String] ?? secrets.scopes
-        secrets.claudeKeychainItem = item.raw
-        if let existing {
-            try store.updateSecrets(for: existing.id, secrets)
-        } else {
-            try store.add(
-                Account(provider: .claude, kind: .storedToken, label: email),
-                secrets: secrets)
+    /// Poller가 매 갱신 주기 끝에 호출. 활성 계정 파일을 바꿨으면 true.
+    static func evaluate(
+        states: [AccountState], store: AccountStore,
+        active: ActiveAccountStore = .shared,
+        autoRoll: Bool = SettingsStore.shared.load().autoRoll == true,
+        now: Date = Date()
+    ) async -> Bool {
+        let current = active.read()
+        let decision = RollingPolicy.decide(
+            states: states, activeId: current?.accountId, autoRoll: autoRoll,
+            lastRollAt: [lastRollAt, active.lastRollAt()].compactMap { $0 }.max(),
+            now: now)
+
+        switch decision {
+        case .idle, .disabled:
+            notifiedExhausted = false
+            return false
+        case .cooldown:
+            return false
+        case .assign(let id):
+            guard let target = states.first(where: { $0.account.id == id })?.account else { return false }
+            do {
+                try write(target, from: nil, reason: "활성 계정 자동 지정", store: store,
+                          active: active, now: now)
+                return true
+            } catch {
+                notify("[!] 활성 계정 지정 실패", error.localizedDescription)
+                return false
+            }
+        case .exhausted(let reason):
+            if !notifiedExhausted {
+                notifiedExhausted = true
+                let header = "[!] 계정 롤링 불가 - 전 계정 한도 임박 (\(reason))"
+                notify(header, "등록된 모든 Claude 계정이 \(Int(RollingPolicy.threshold))% 이상입니다.")
+                await broadcast(header, states)
+            }
+            return false
+        case .roll(let fromId, let toId, let reason):
+            guard let target = states.first(where: { $0.account.id == toId })?.account else { return false }
+            let from = states.first(where: { $0.account.id == fromId })?.account
+            do {
+                try await roll(to: target, from: from, states: states, store: store,
+                               active: active, reason: reason, now: now)
+                return true
+            } catch {
+                notify("[!] 계정 롤링 실패", error.localizedDescription)
+                return false
+            }
         }
     }
 
-    /// 키체인 아이템 JSON 합성. 회수해둔 원본(template)이 있으면 그 구조에 새
-    /// 토큰만 갈아끼우고, 없으면 현재 아이템을 틀로 삼는다. 틀에서 못 채우는
-    /// 계정 고유 필드(subscriptionType 등)는 다음 claude 자체 리프레시가
-    /// 권위 있는 값으로 교정한다.
-    static func buildItem(
-        secrets: AccountSecrets, template: String?, fallbackTemplate: String?
-    ) -> String {
-        var oauth: [String: Any] = [:]
-        for t in [template, fallbackTemplate] {
-            if let t,
-               let json = try? JSONSerialization.jsonObject(with: Data(t.utf8)) as? [String: Any],
-               let o = json["claudeAiOauth"] as? [String: Any] {
-                oauth = o
-                break
-            }
+    /// 실제 교체 (자동·수동 공통): 활성 계정 파일 원자 교체 → 이력 →
+    /// 네이티브 알림 + 웹훅.
+    static func roll(
+        to target: Account, from: Account?, states: [AccountState], store: AccountStore,
+        active: ActiveAccountStore = .shared, reason: String, now: Date = Date()
+    ) async throws {
+        try write(target, from: from?.id, reason: reason, store: store, active: active, now: now)
+        lastRollAt = now
+        notifiedExhausted = false
+
+        let header = "[>] 계정 롤링: \(from?.email ?? "?") → \(target.email) (\(reason))"
+        notify(header, "다음 claude 실행부터 이 계정의 1년 토큰이 쓰입니다 (usagebar-claude 경유).")
+        await broadcast(header, states)
+    }
+
+    private static func write(
+        _ target: Account, from: UUID?, reason: String, store: AccountStore,
+        active: ActiveAccountStore, now: Date
+    ) throws {
+        guard target.isClaudeToken else { throw UsageBarError.reregistrationRequired }
+        guard let token = store.secrets(for: target.id)?.accessToken, !token.isEmpty else {
+            throw UsageBarError.invalidCredentials("대상 계정의 저장된 토큰 없음")
         }
-        oauth["accessToken"] = secrets.accessToken ?? ""
-        oauth["refreshToken"] = secrets.refreshToken ?? ""
-        oauth["expiresAt"] = NSNumber(value: secrets.expiresAtMs ?? 0)
-        oauth["scopes"] = secrets.scopes ?? ClaudeOAuth.legacyScopes
-        let root = ["claudeAiOauth": oauth]
-        guard let data = try? JSONSerialization.data(withJSONObject: root),
-              let raw = String(data: data, encoding: .utf8) else {
-            return ""
+        try active.write(accountId: target.id, token: token)
+        do {
+            try active.appendHistory(.init(ts: now, from: from, to: target.id, reason: reason))
+        } catch {
+            // 교체 자체는 끝났다 — 이력 실패는 알리되 롤링을 되돌리지 않는다.
+            FileHandle.standardError.write(Data("roll-history 기록 실패: \(error.localizedDescription)\n".utf8))
         }
-        return raw
     }
 }

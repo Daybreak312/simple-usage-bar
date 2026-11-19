@@ -25,7 +25,7 @@ struct AppSettings: Codable {
     var menuBarWindow: String?
     /// Auto-install updates when a new commit is detected. nil = true.
     var autoUpdate: Bool?
-    /// Claude 계정 자동 롤링 (95% 도달 시 키체인 로그인 교체). nil = false.
+    /// Claude 계정 자동 롤링 (95% 도달 시 활성 계정 파일 교체). nil = false.
     var autoRoll: Bool?
 
     var isEmpty: Bool { slackURL.isEmpty && discordURL.isEmpty }
@@ -94,6 +94,10 @@ enum TUIFormat {
                 .padding(toLength: 6, withPad: " ", startingAt: 0)
             let label = state.staleNote.map { "\(state.account.label) (\($0))" }
                 ?? state.account.label
+            if state.account.needsReregistration {
+                return Row(name: name, label: label,
+                           five: nil, seven: nil, tail: Account.reregistrationNotice)
+            }
             if let error = state.lastError {
                 return Row(name: name, label: label,
                            five: nil, seven: nil, tail: "오류: \(error)")

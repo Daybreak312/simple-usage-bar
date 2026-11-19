@@ -1,5 +1,30 @@
 import Foundation
 
+/// Fixed data locations. Same domain whether the binary runs bundled
+/// (/Applications) or bare (.build/debug).
+enum AppPaths {
+    /// ~/Library/Application Support/UsageBar
+    static var support: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("UsageBar", isDirectory: true)
+    }
+
+    /// Claude token-era data: active account, roll history, usage history
+    /// (and, from Phase 2, the wrapper's launch/event logs). Kept 0700.
+    static var claudeDirectory: URL {
+        support.appendingPathComponent("claude", isDirectory: true)
+    }
+
+    /// Creates `url` as 0700, and tightens it if it already existed looser.
+    static func ensurePrivateDirectory(_ url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+}
+
 /// Persists accounts and their secrets under ~/Library/Application Support/UsageBar/.
 ///
 /// v0.1 stores secrets in a chmod-600 JSON file — the same posture as
@@ -14,9 +39,7 @@ final class AccountStore {
     private let queue = DispatchQueue(label: "dev.daybreak.usagebar.store")
 
     init(directory: URL? = nil) {
-        let base = directory ?? FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        )[0].appendingPathComponent("UsageBar", isDirectory: true)
+        let base = directory ?? AppPaths.support
         self.directory = base
         self.accountsURL = base.appendingPathComponent("accounts.json")
         self.secretsURL = base.appendingPathComponent("secrets.json")
@@ -56,14 +79,13 @@ final class AccountStore {
         }
     }
 
-    /// Update a persisted account's display label — the local-CLI row follows
-    /// whatever account Claude Code is currently logged into.
-    func updateLabel(for id: UUID, _ label: String) throws {
+    /// Record the organization id a probe reported for this account.
+    func updateOrganizationId(for id: UUID, _ organizationId: String?) throws {
         try queue.sync {
             var accounts = (try? Data(contentsOf: accountsURL))
                 .flatMap { try? Self.decoder.decode([Account].self, from: $0) } ?? []
             guard let idx = accounts.firstIndex(where: { $0.id == id }) else { return }
-            accounts[idx].label = label
+            accounts[idx].organizationId = organizationId
             try write(accounts, to: accountsURL)
         }
     }

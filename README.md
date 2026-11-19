@@ -1,7 +1,8 @@
 # SimpleUsageBar
 
 Claude Code / Codex(ChatGPT 구독) 계정들의 5h/7d 사용량을 메뉴바에서 보여주는 macOS 앱.
-계정이 이 맥에서 사용 중일 필요 없음 — 3분마다 각 프로바이더의 usage API를 직접 폴링한다.
+계정이 이 맥에서 사용 중일 필요 없음 — 3분마다 계정별로 직접 조회한다
+(Claude: 1년 토큰으로 1토큰 탐침 요청 → 응답 헤더, Codex: usage API).
 
 ```
 Claude | example-one@gmail.com  5h [====------] 43%  7d [==--------] 21%
@@ -12,6 +13,7 @@ Codex  | example-two@gmail.com  5h [=---------] 12%  7d [===-------] 33%
 
 ```bash
 swift build                     # 개발 빌드
+swift test                      # 단위 테스트 (Tests/UsageBarTests — 네트워크 없이 녹화 응답 사용)
 .build/debug/usagebar           # GUI (메뉴바 아이콘)
 scripts/make-app.sh --install   # /Applications/SimpleUsageBar.app 설치
 ```
@@ -20,25 +22,22 @@ scripts/make-app.sh --install   # /Applications/SimpleUsageBar.app 설치
 
 ## 계정 등록
 
-### Claude — 앱 내장 OAuth 로그인
+### Claude — 1년 토큰 (`claude setup-token`)
 
-> ⚠️ `claude setup-token` 토큰은 **사용 불가** — usage/profile 엔드포인트가
-> `user:profile` 스코프를 요구하는데 setup-token엔 없음 (403, 2026-07-10 실측).
-> 그래서 앱이 Claude Code와 동일한 OAuth PKCE 플로우를 내장한다.
+1. 터미널에서 `claude setup-token`을 실행해 그 계정으로 로그인하면 1년 유효 토큰
+   (`sk-ant-oat01-…`)이 나온다.
+2. 계정 추가 → Claude → 토큰 붙여넣기 + **라벨(이메일) 직접 입력** — 이 토큰은
+   `user:inference` 스코프뿐이라 이메일(profile)을 조회할 수 없다.
+3. 저장 전에 탐침 요청으로 검증한다(200 또는 한도 거절 429면 통과). 같은 조직
+   (`anthropic-organization-id`)의 토큰이 이미 있으면 경고하고, 한 번 더 눌러야 추가된다.
 
-1. 계정 추가 → Claude → "OAuth 로그인" → **브라우저에서 로그인 열기**
-   (다른 계정은 **URL 복사** 후 시크릿 창에 붙여넣어 그 계정으로 로그인)
-2. 승인하면 화면에 코드(`code#state`)가 뜸 → 앱에 붙여넣고 추가
+CLI: `usagebar add-claude-token --label <이메일> < 토큰파일` — 토큰은 **stdin**으로만
+받는다(argv는 `ps`에 노출). 같은 조직 중복은 `--allow-duplicate` 없이는 거부.
 
-액세스 토큰 만료 시 리프레시 토큰으로 자동 갱신 (회전 가정, 즉시 재저장).
-
-이 맥에 로그인된 Claude Code 계정은 "토큰 직접 입력" 탭의 "로컬 Claude Code 계정
-자동 감지"로 등록 가능 (Keychain 읽기 전용 참조, 갱신은 Claude Code에 위임).
-Claude Code에서 다른 계정으로 로그인을 바꾸면 다음 폴링에서 라벨(이메일)이 자동으로
-따라온다 — 토큰이 바뀐 폴링에서만 프로필을 재조회하고, 교체 시점에는 알럿 기준선을
-리셋해 계정 전환이 임계 돌파 알럿으로 오인되지 않는다.
-
-CLI: `usagebar add-claude --oauth` / `usagebar add-claude --from-local-cli`
+**예전 OAuth 로그인 / 로컬 Claude Code 계정 행:** 목록에 남지만 조회·롤링에서 빠지고
+「1년 토큰으로 재등록 필요」가 표시된다. 그 행의 토큰은 사용자가 행을 지울 때까지
+`secrets.json`에 그대로 보존된다(자동 삭제 없음). 앱은 더 이상 키체인
+(`Claude Code-credentials`)을 읽거나 쓰지 않는다.
 
 ### Codex
 
@@ -54,33 +53,28 @@ usagebar add-codex /tmp/cx/auth.json
 rm -rf /tmp/cx
 ```
 
-## Claude 계정 자동 롤링
+## 활성 계정 · 자동 롤링
 
-설정에서 켤 수 있다 (기본 꺼짐). 켜면 로컬 Claude Code 계정의 5h/7d/모델 주간 중
-하나가 **95% 이상**이 되는 순간, 등록된 다음 Claude 계정으로 **키체인 로그인 자체를
-교체**한다 — claude CLI를 쓰는 모든 도구가 다음 계정으로 이어서 동작한다.
-수동 교체는 팝오버에서 계정 행에 마우스를 올리면 나오는 **전환 버튼**(실수 방지를
-위해 두 번 클릭) 또는 `usagebar roll --to <email>` (`--dry-run` 지원).
+**활성 계정** = `~/Library/Application Support/UsageBar/claude/active` 파일이 가리키는
+1년 토큰 계정. 래퍼 `usagebar-claude`(준비 중 — 이 맥의 claude 호출 앞단)가 이 파일의 토큰을
+`CLAUDE_CODE_OAUTH_TOKEN`으로 넣어 claude를 실행한다. 팝오버에서 활성 계정 행에
+「사용 중」이 붙는다. 활성 계정이 없고 1년 토큰 계정이 있으면 앱이 우선순위 1등
+(임계 미만·정상 조회 계정 우선)을 자동 지정한다.
 
-동작 규칙:
+**롤링 = 이 파일 교체.** 키체인 로그인은 건드리지 않는다. 설정에서 자동 롤링을 켜면
+(기본 꺼짐) 활성 계정의 지표 **max(5h 있으면, 7d)가 95% 이상**(또는 서버가 한도 거절
+`rejected`를 알림)이 되는 순간 다음 계정으로 바꾼다. 수동 교체는 계정 행에 마우스를
+올리면 나오는 **전환 버튼**(두 번 클릭) 또는 `usagebar roll --to <email>`
+(`--dry-run` 지원).
 
-- 후보는 **우선순위 → 등록 순서**로 고른다. 우선순위는 계정별 설정(기본 1,
-  낮을수록 우선)이며 지표 95% 미만·리프레시 토큰 보유 계정만 후보가 된다.
-  전부 한도 임박이면 교체하지 않고 알림만 보낸다. 교체 간 최소 10분 쿨다운.
-  우선순위 변경: 팝오버에서 계정 행 호버 → `P1` 메뉴, 또는
-  `usagebar priority <email> <1-9>`.
-- **계보 보존 프로토콜:** 교체 전에 현 활성 계정의 키체인 아이템을 통째로 앱에
-  회수(등록 안 된 계정이면 행 자동 생성)한 뒤에만 다음 계정을 쓴다. 대상 계정은
-  교체 직전 한 번 리프레시해 유효한 액세스 토큰을 넘기므로, 교체 직후 claude를
-  실행하지 않아도 모니터링이 끊기지 않는다. 활성 계정과 중복되는 저장 행은
-  섀도 처리(비표시·비폴링)되어 Claude Code와 토큰 갱신이 경합하지 않는다.
-- 교체 시 네이티브 알림 + (설정돼 있으면) 웹훅 알림이 나간다.
-- 구버전(스코프 3종)으로 등록한 계정으로 교체하면 claude 핵심 기능(추론)은
-  동작하나 일부 기능(세션 동기화·MCP·파일 업로드) 스코프가 없다 — OAuth로
-  재등록하면 Claude Code와 동일한 5종 스코프로 발급된다.
-- `~/.claude.json`의 표시용 계정 정보는 건드리지 않는다 — `/status` 표기가
-  다음 로그인까지 이전 계정으로 보일 수 있으나 실제 API 신원은 키체인 토큰을
-  따른다 (2026-07-24 왕복 실측: 교체 후 `claude -p` 정상 동작).
+- 후보는 활성 아닌 1년 토큰 계정 중 마지막 조회 정상·지연 아님·지표 95% 미만,
+  **우선순위 → 등록 순서**. 우선순위는 계정별(기본 1, 낮을수록 우선) — 계정 행 호버 →
+  `P1` 메뉴, 또는 `usagebar priority <email> <1-9>`.
+- 전부 한도 임박이면 교체하지 않고 알림 1회. 교체 간 최소 10분 쿨다운
+  (`roll-history.jsonl` 기준 — 앱 재시작·CLI 교체 뒤에도 유지).
+- 교체 시 네이티브 알림 + (설정돼 있으면) 웹훅 알림.
+- 파일 교체는 같은 디렉터리 임시 파일(처음부터 0600) + `rename`이라, 읽는 쪽은 항상
+  옛 쌍 또는 새 쌍만 본다. 활성 계정을 삭제하면 파일도 지워진다.
 
 ## CLI
 
@@ -92,40 +86,52 @@ rm -rf /tmp/cx
 |---|---|
 | `usagebar check` | 모든 계정 사용량을 stdout으로 (GUI 없이 파이프라인 검증) |
 | `usagebar list` | 등록된 계정 목록 |
-| `usagebar add-claude [--from-local-cli]` | Claude 계정 추가 |
+| `usagebar add-claude-token --label <email>` | Claude 1년 토큰 계정 추가 (토큰은 stdin) |
 | `usagebar add-codex <auth.json \| ->` | Codex 계정 추가 |
 | `usagebar remove <uuid-prefix>` | 계정 제거 |
-| `usagebar roll [--to <email>] [--dry-run]` | Claude Code 키체인 로그인 교체 |
+| `usagebar roll [--to <email>] [--dry-run]` | 활성 Claude 계정(활성 계정 파일) 교체 |
+| `usagebar priority <email\|uuid> <1-9>` | 롤링 우선순위 |
 
 ## 데이터 위치
 
-- `~/Library/Application Support/UsageBar/accounts.json` — 계정 메타 (비밀 없음)
+- `~/Library/Application Support/UsageBar/accounts.json` — 계정 메타 (비밀 없음 — 라벨·종류·우선순위·조직 id)
 - `~/Library/Application Support/UsageBar/secrets.json` — 토큰 (chmod 600, `~/.codex/auth.json`과 동일한 보안 수준)
+- `~/Library/Application Support/UsageBar/claude/` (0700)
+  - `active` (0600) — 1줄 활성 계정 UUID, 2줄 토큰. 활성 계정이 없으면 파일 없음.
+  - `roll-history.jsonl` — 교체 이력 `{"v":1,"ts":<ms>,"from":<uuid|null>,"to":<uuid>,"reason":…}` (토큰 없음)
+  - `usage-history.jsonl` — 계정별 사용률 표본 `{"v":1,"ts":<ms>,"accountId","sevenDay","fiveHour","status"}`.
+    같은 계정의 같은 3분 구간(epoch/180초) 표본은 최신 값 하나로 합치고, 90일 지난 표본은 지운다.
 - 폴링: 계정별 독립 스케줄 — 사용량과 무관하게 평탄한 3분 주기.
-  오버라이드: `pollIntervalSeconds`(기본 180) defaults 키
-
-Keychain 마이그레이션은 서명된 .app 배포 시점에 예정 (ad-hoc 빌드는 서명이 매번 바뀌어
-Keychain ACL 프롬프트가 빌드마다 뜨기 때문에 v0.1은 파일 저장 채택).
+  오버라이드: `pollIntervalSeconds`(기본 180, 최소 30) defaults 키
 
 ## API 레퍼런스 (실측 기준)
 
-### Claude — 2026-07-10 본 머신에서 검증
+### Claude — 1년 토큰 탐침 (2026-11-19 본 머신, claude 2.1.293 실측)
 
 ```
-GET https://api.anthropic.com/api/oauth/usage
-GET https://api.anthropic.com/api/oauth/profile
-Authorization: Bearer sk-ant-oat01-…
+POST https://api.anthropic.com/v1/messages
+Authorization: Bearer sk-ant-oat01-…        (claude setup-token, 스코프 user:inference)
+anthropic-version: 2023-06-01
 anthropic-beta: oauth-2025-04-20
+content-type: application/json
+
+{"model":"claude-haiku-4-5","max_tokens":1,"system":"You are Claude Code, Anthropic's official CLI for Claude.","messages":[{"role":"user","content":"."}]}
 ```
 
-usage 응답: `five_hour`/`seven_day` `{utilization: 0-100, resets_at: ISO8601}`,
-`limits[]`에 모델 스코프 주간 한도 (`kind: weekly_scoped`, `scope.model.display_name`).
-profile 응답: `account.email`. **usage/profile 모두 `user:profile` 스코프 필수**
-(setup-token 토큰은 `user:inference`뿐이라 403 — 실측 확인).
-
-OAuth: authorize `https://claude.ai/oauth/authorize` (PKCE S256, client_id는
-Claude Code 공용), token `https://console.anthropic.com/v1/oauth/token`
-(authorization_code / refresh_token grant). 코드는 `code#state`로 붙여넣기 방식.
+- 응답 헤더(F1): `anthropic-ratelimit-unified-7d-utilization`(0~1 실수 → ×100),
+  `-7d-reset`(epoch 초), `-7d-status`·`-status`(`allowed`/`allowed_warning`/`rejected`),
+  `-reset`, `-representative-claim`(예: `seven_day`), `-overage-status`,
+  `anthropic-organization-id`. **Ultra 플랜은 5h 헤더가 없다** — 있으면
+  `-5h-utilization`/`-5h-reset`으로 5h 창을 채우고, 없으면 5h 게이지를 숨긴다.
+  헤더 이름은 대소문자 무시.
+- 429 + `-status: rejected` → 한도 도달 상태로 정상 스냅샷(롤링 지표 100 취급).
+  ratelimit 헤더 없는 429 → 일반 레이트리밋(이전 값 유지 + 「429로 인해 지연됨」,
+  `Retry-After` 존중). 401/403 → 「토큰 무효 또는 폐기됨 — 재발급 필요」.
+- haiku 외 모델(F2)은 system 프롬프트가 위 Claude Code 문구일 때만 200, 아니면
+  ratelimit 헤더 없는 429. haiku는 system 없이도 200이지만 계약을 하나로 두려고 항상 보낸다.
+- `count_tokens`(F3)는 200이지만 ratelimit 헤더가 없어 사용률 조회에 못 쓴다.
+- `/api/oauth/usage`·`/api/oauth/profile`은 이 토큰으로 403(`oauth_scope_insufficient`)
+  — 그래서 이메일은 사용자가 입력한다.
 
 ### Codex — 스펙은 codex-rs 소스 기준, 토큰 만료로 라이브 검증 대기
 
