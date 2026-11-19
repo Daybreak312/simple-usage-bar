@@ -56,7 +56,7 @@ rm -rf /tmp/cx
 ## 활성 계정 · 자동 롤링
 
 **활성 계정** = `~/Library/Application Support/UsageBar/claude/active` 파일이 가리키는
-1년 토큰 계정. 래퍼 `usagebar-claude`(준비 중 — 이 맥의 claude 호출 앞단)가 이 파일의 토큰을
+1년 토큰 계정. 래퍼 `usagebar-claude`(이 맥의 claude 호출 앞단 — 아래 절)가 이 파일의 토큰을
 `CLAUDE_CODE_OAUTH_TOKEN`으로 넣어 claude를 실행한다. 팝오버에서 활성 계정 행에
 「사용 중」이 붙는다. 활성 계정이 없고 1년 토큰 계정이 있으면 앱이 우선순위 1등
 (임계 미만·정상 조회 계정 우선)을 자동 지정한다.
@@ -72,9 +72,68 @@ rm -rf /tmp/cx
   `P1` 메뉴, 또는 `usagebar priority <email> <1-9>`.
 - 전부 한도 임박이면 교체하지 않고 알림 1회. 교체 간 최소 10분 쿨다운
   (`roll-history.jsonl` 기준 — 앱 재시작·CLI 교체 뒤에도 유지).
+- **즉시 롤링:** 래퍼를 거쳐 실행 중인 claude가 활성 계정의 한도 거절
+  (`rate_limit_event`의 `status: rejected`, 또는 한도 문구)을 내면, 앱이 15초 안에
+  임계값·10분 쿨다운과 무관하게 다음 후보로 바꾼다. 직전 교체 후 60초 안이면 보류
+  (새 계정도 곧바로 거절되는 연쇄 방지). 10분 넘은 이벤트로는 즉시 롤링하지 않는다.
+  자동 롤링 스위치가 꺼져 있으면 하지 않는다.
 - 교체 시 네이티브 알림 + (설정돼 있으면) 웹훅 알림.
 - 파일 교체는 같은 디렉터리 임시 파일(처음부터 0600) + `rename`이라, 읽는 쪽은 항상
   옛 쌍 또는 새 쌍만 본다. 활성 계정을 삭제하면 파일도 지워진다.
+
+## claude 래퍼 (`usagebar-claude`)
+
+이 맥의 모든 claude 호출(OpenClaw·dev-loop·터미널) 앞단에 두는 bash 래퍼
+(`scripts/usagebar-claude`, macOS 기본 `/bin/bash` 3.2에서 동작). 호출 경로 전환
+(OpenClaw `command`, dev-loop `CLAUDE_BIN`, `~/.zshrc` alias)은 설치와 별개로 직접 한다.
+
+**설치:** `scripts/make-app.sh --install`(자동 업데이트 포함)이 `scripts/install-wrapper.sh`로
+래퍼와 관측기용 실행 파일 사본을 **앱 번들 밖 고정 경로**
+`~/Library/Application Support/UsageBar/bin/`(0700)에 임시 파일 + `mv`로 원자 교체
+설치하고, `/opt/homebrew/bin/usagebar-claude`(없으면 `/usr/local/bin`) 링크를 만든다.
+번들은 설치 때 `rm -rf` 후 복사되므로, 번들 안 경로를 부르면 업데이트 순간의
+claude 호출이 깨진다 — 래퍼는 관측기를 이 고정 경로로만 부른다.
+
+**동작 (한 번의 실행):**
+1. 실제 claude 찾기: `USAGEBAR_CLAUDE_REAL_BIN` → `/opt/homebrew/bin/claude` →
+   `~/.claude/local/claude` → PATH. 자기 자신(링크 해석 후)과 `claude-failover`·
+   `usagebar-claude`는 건너뛴다. 못 찾으면 stderr 한 줄 + exit 127.
+2. 토큰: 호출자가 `CLAUDE_CODE_OAUTH_TOKEN`을 넣었으면 그대로. 아니면 활성 계정 파일의
+   토큰을 넣고 `ANTHROPIC_API_KEY`·`ANTHROPIC_AUTH_TOKEN`을 unset. 하위 명령에는 넣지 않는다.
+3. 세션 id: `--session-id X`/`=X` → X(arg), `--resume X`/`-r X`/`--resume=X` → X(resume,
+   UUID일 때만 — 값 없는 피커·검색어는 null), `--continue`/`-c` → cwd의 Claude 프로젝트
+   기록 디렉터리(`~/.claude/projects/<cwd의 영숫자 외 문자를 '-'로>/`)에서 가장 최근
+   `*.jsonl`(continue). 아무것도 없고 `--fork-session`·`--from-pr`·`--teleport`·`--cloud`도
+   없으면 `--session-id <uuidgen 소문자>`를 인자 **맨 앞에** 주입(injected).
+4. 실행 기록 한 줄 → `claude/launches.jsonl`, 그리고 `exec` — claude가 래퍼 PID를 이어받아
+   신호·종료 코드가 그대로 전달된다.
+   - 대화형(`-p` 없음): 그대로 exec (TTY 유지, stdout 가로채지 않음).
+   - `-p`/`--print`(text·json·stream-json): stdout만 관측기 `usagebar observe-claude`를
+     거친다. 관측기가 못 뜨거나 죽으면 `cat`이 남은 출력을 넘긴다. stdin·stderr는 그대로.
+   - 하위 명령(첫 인자가 `-`로 시작하지 않는 한 단어: `mcp`, `setup-token`, `update`,
+     `doctor` …)과 `--version`/`-v`/`--help`/`-h`: 토큰·세션 주입·관측 없이 exec
+     (기록은 `mode: subcommand`).
+
+**관측기 (`usagebar observe-claude`):** 받은 바이트를 읽는 즉시 그대로 넘기고(줄 경계·
+인코딩 무관, 개행 없는 끝 포함), 넘긴 뒤 줄을 검사한다. stream-json의 `system/init` →
+`session`, `rate_limit_event` → `rate_limit`, `result` → `result`(토큰 수치·비용만),
+오류 결과나 짧은 텍스트 줄(512바이트 이하)의 한도 문구 → `limit_text`. 파싱·쓰기 실패는
+삼키고, stdout이 닫히면(EPIPE) 조용히 끝난다. SIGINT·SIGPIPE는 무시(Ctrl-C는 claude가
+처리하고 관측기는 EOF까지 중계). GUI를 띄우지 않는다.
+
+**fail-open:** 활성 계정 파일이 없거나 형식이 틀리거나 읽을 수 없으면 주입 없이(키체인
+로그인으로) 실행. 해시·기록·관측기 문제도 claude 실행을 막지 않는다. 예외는 실제 claude를
+못 찾은 경우뿐.
+
+**우회:** `USAGEBAR_CLAUDE_BYPASS=1` → 기록·주입·관측 없이 실제 claude로 exec.
+
+**비밀:** 토큰 원문은 기록·출력에 쓰지 않는다. 계정 대조용으로 SHA-256 앞 16자리
+(`tokenHash`)만 남기며, 해시 계산 때도 토큰은 파이프(stdin)로만 넘겨 `ps`에 안 보인다.
+
+**시험:** `scripts/test-wrapper.sh` — 가짜 claude로 토큰 주입·세션 id·기록 형식·바이트
+동일 통과·종료 코드·stdin·PID 유지·관측기 실패·설치·부가 시간(중앙값 ≤ 100ms, 이 맥
+실측 약 20ms)을 확인한다. 실제 claude·토큰·네트워크를 쓰지 않는다. 시험용 env:
+`USAGEBAR_CLAUDE_DIR`(데이터 디렉터리), `USAGEBAR_OBSERVER_BIN`, `USAGEBAR_CLAUDE_SEARCH_PATHS`.
 
 ## CLI
 
@@ -91,6 +150,7 @@ rm -rf /tmp/cx
 | `usagebar remove <uuid-prefix>` | 계정 제거 |
 | `usagebar roll [--to <email>] [--dry-run]` | 활성 Claude 계정(활성 계정 파일) 교체 |
 | `usagebar priority <email\|uuid> <1-9>` | 롤링 우선순위 |
+| `usagebar observe-claude --launch <id> --dir <경로>` | `usagebar-claude` 내부용 stdout 관측기 (직접 쓸 일 없음) |
 
 ## 데이터 위치
 
@@ -101,6 +161,22 @@ rm -rf /tmp/cx
   - `roll-history.jsonl` — 교체 이력 `{"v":1,"ts":<ms>,"from":<uuid|null>,"to":<uuid>,"reason":…}` (토큰 없음)
   - `usage-history.jsonl` — 계정별 사용률 표본 `{"v":1,"ts":<ms>,"accountId","sevenDay","fiveHour","status"}`.
     같은 계정의 같은 3분 구간(epoch/180초) 표본은 최신 값 하나로 합치고, 90일 지난 표본은 지운다.
+    탐침 결과와 래퍼의 `rate_limit` 이벤트가 모두 표본이 된다.
+  - `launches.jsonl` — 래퍼 실행 기록 (실행마다 한 줄, 4096바이트 미만 O_APPEND):
+    `{"v":1,"ts":<ms>,"launchId":<uuid>,"accountId":<uuid|null>,"tokenHash":<hex16|null>,"sessionId":<id|null>,"sessionSource":"arg|resume|continue|injected|none","cwd":<경로|null>,"mode":"interactive|print|stream-json|subcommand","pid":<pid>}`
+    (cwd가 이스케이프 후 너무 길면 null)
+  - `events.jsonl` — 관측기 이벤트 `{"v":1,"ts":<ms>,"launchId","accountId","tokenHash","type",…}`:
+    `session`(`sessionId`), `rate_limit`(`status`, `rateLimitType`, `resetsAt`, `overageStatus`,
+    `windows: {<창 이름>: {utilization 0~1, resetsAt}}`, `sessionId`), `result`(`sessionId`,
+    `subtype`, `isError`, `totalCostUsd`, `modelUsage: {<모델>: {inputTokens, outputTokens,
+    cacheReadInputTokens, cacheCreationInputTokens}}`), `limit_text`(`source: text|result`, `match`).
+    앱은 `events.cursor`(inode + 바이트 오프셋)로 이어서 읽는다.
+  - 보존: `launches`·`events`는 라이브 파일 `X.jsonl` + 보관본 `X.1.jsonl` 두 개로 둔다.
+    라이브 파일의 첫 줄이 7일 지나면 앱이 `X.rotating.jsonl`로 rename(다음 append가 새
+    라이브 파일을 만든다) → 1초 뒤 보관본에 합치고 지운다. 보관본은 하루 한 번 90일 지난
+    줄을 지운다. 전체 기록은 `X.1.jsonl` → `X.rotating.jsonl` → `X.jsonl` 순서로 읽는다.
+- `~/Library/Application Support/UsageBar/bin/` (0700) — `usagebar-claude` 래퍼와 관측기
+  실행 파일 사본 (`make-app.sh --install`이 갱신)
 - 폴링: 계정별 독립 스케줄 — 사용량과 무관하게 평탄한 3분 주기.
   오버라이드: `pollIntervalSeconds`(기본 180, 최소 30) defaults 키
 
@@ -132,6 +208,17 @@ content-type: application/json
 - `count_tokens`(F3)는 200이지만 ratelimit 헤더가 없어 사용률 조회에 못 쓴다.
 - `/api/oauth/usage`·`/api/oauth/profile`은 이 토큰으로 403(`oauth_scope_insufficient`)
   — 그래서 이메일은 사용자가 입력한다.
+
+### claude CLI 출력 (래퍼 관측 대상, 같은 날 실측)
+
+- `CLAUDE_CODE_OAUTH_TOKEN=<1년 토큰>`으로 `claude -p`가 정상 동작하고 키체인보다 우선한다(F5).
+- `claude -p --output-format stream-json --verbose` stdout(F4): 첫 줄
+  `{"type":"system","subtype":"init",…,"session_id":…}`, 응답 뒤
+  `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1795143600,"rateLimitType":"seven_day","overageStatus":"rejected",…,"unifiedWindows":{"seven_day":{"utilization":0.62,"resetsAt":1795143600}}},"session_id":…}`
+  (utilization 0~1), 마지막 `{…,"session_id":…,"total_cost_usd":…,"modelUsage":{"<모델>":{"inputTokens","outputTokens","cacheReadInputTokens","cacheCreationInputTokens",…,"costUSD"}},"is_error":false,…,"type":"result"}`
+  — result 줄은 `type`이 맨 앞이 아니다. 컴팩트 JSON(공백 없음).
+- `-p`에서 stdin이 TTY가 아니면 claude가 stdin을 기다린다(3초 뒤 경고) — 래퍼는 stdin을
+  건드리지 않으므로 호출자가 `< /dev/null` 등으로 정한다.
 
 ### Codex — 스펙은 codex-rs 소스 기준, 토큰 만료로 라이브 검증 대기
 

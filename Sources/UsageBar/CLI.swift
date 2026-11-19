@@ -359,5 +359,7 @@ enum CLI {
           usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
           usagebar webhook slack|discord <url> | clear | show | test
           usagebar parse-codex     wham/usage JSON(stdin) 파싱 결과 확인 (디버그)
+          usagebar observe-claude --launch <id> --dir <경로>
+                                  usagebar-claude 내부용 — claude stdout 통과·이벤트 기록
     """
 }

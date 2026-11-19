@@ -44,6 +44,9 @@ if [[ "${1:-}" == "--install" ]]; then
     echo "설치됨: /Applications/SimpleUsageBar.app"
     echo "로그인 시 자동 시작: 시스템 설정 → 일반 → 로그인 항목에 SimpleUsageBar 추가"
 
+    # claude 래퍼 + 관측기 — 번들 밖 고정 경로에 원자 교체 설치 + usagebar-claude 링크.
+    scripts/install-wrapper.sh .build/release/usagebar
+
     # 터미널용 CLI 링크 — 같은 바이너리가 인자에 따라 CLI로 동작한다.
     BIN=/Applications/SimpleUsageBar.app/Contents/MacOS/SimpleUsageBar
     for dir in /opt/homebrew/bin /usr/local/bin; do

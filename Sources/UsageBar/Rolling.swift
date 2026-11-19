@@ -8,6 +8,9 @@ import Foundation
 enum RollingPolicy {
     static let threshold: Double = 95
     static let cooldown: TimeInterval = 10 * 60
+    /// 래퍼가 관측한 한도 거절로 인한 즉시 롤링 사이의 최소 간격 — 새 계정도
+    /// 곧바로 거절되는 경우(같은 조직 등) 연쇄 교체를 막는다.
+    static let immediateGuard: TimeInterval = 60
 
     /// 롤링 판단 지표: max(5h, 7d). 서버가 한도 거절(`rejected`)을 알린
     /// 스냅샷은 헤더 수치와 무관하게 100으로 본다.
@@ -102,6 +105,24 @@ enum RollingPolicy {
         }
         return .roll(from: activeId, to: target.account.id, reason: reason)
     }
+
+    /// 실행 중인 claude가 활성 계정의 한도 거절(`rejected` / 한도 문구)을
+    /// 알렸을 때: 임계값·10분 쿨다운을 무시하고 바로 다음 후보로. 단 직전
+    /// 교체 후 `immediateGuard`(60초) 안이면 보류. 후보 규칙은 `decide`와 같다.
+    static func decideImmediate(
+        states: [AccountState], activeId: UUID?, autoRoll: Bool,
+        lastRollAt: Date?, now: Date, reason: String
+    ) -> Decision {
+        guard let activeId, ranked(states).contains(where: { $0.account.id == activeId }) else {
+            return .idle  // 활성 미지정은 정기 판단(decide)의 assign이 맡는다
+        }
+        guard autoRoll else { return .disabled }
+        if let lastRollAt, now.timeIntervalSince(lastRollAt) < immediateGuard { return .cooldown }
+        guard let target = candidates(states: states, activeId: activeId).first else {
+            return .exhausted(reason: reason)
+        }
+        return .roll(from: activeId, to: target.account.id, reason: reason)
+    }
 }
 
 /// 롤링 실행기 — 활성 계정 파일 교체 + 이력 + 알림 + 웹훅.
@@ -138,9 +159,32 @@ enum RollingEngine {
         let current = active.read()
         let decision = RollingPolicy.decide(
             states: states, activeId: current?.accountId, autoRoll: autoRoll,
-            lastRollAt: [lastRollAt, active.lastRollAt()].compactMap { $0 }.max(),
-            now: now)
+            lastRollAt: latestRoll(active), now: now)
+        return await perform(decision, states: states, store: store, active: active, now: now)
+    }
 
+    /// 래퍼 이벤트(활성 계정 한도 거절)로 즉시 롤링. 교체했으면 true.
+    static func evaluateImmediate(
+        states: [AccountState], store: AccountStore, reason: String,
+        active: ActiveAccountStore = .shared,
+        autoRoll: Bool = SettingsStore.shared.load().autoRoll == true,
+        now: Date = Date()
+    ) async -> Bool {
+        let decision = RollingPolicy.decideImmediate(
+            states: states, activeId: active.read()?.accountId, autoRoll: autoRoll,
+            lastRollAt: latestRoll(active), now: now, reason: reason)
+        return await perform(decision, states: states, store: store, active: active, now: now)
+    }
+
+    /// 가장 최근 계정 간 교체 시각 — 이 프로세스 기록과 roll-history 중 늦은 쪽.
+    private static func latestRoll(_ active: ActiveAccountStore) -> Date? {
+        [lastRollAt, active.lastRollAt()].compactMap { $0 }.max()
+    }
+
+    private static func perform(
+        _ decision: RollingPolicy.Decision, states: [AccountState], store: AccountStore,
+        active: ActiveAccountStore, now: Date
+    ) async -> Bool {
         switch decision {
         case .idle, .disabled:
             notifiedExhausted = false

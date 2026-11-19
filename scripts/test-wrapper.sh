@@ -370,6 +370,29 @@ for m in "-p --output-format stream-json hi" "--model opus"; do
 done
 
 # ════════════════════════════════════════════════════════════
+section "설치 (scripts/install-wrapper.sh)"
+SB="$T/support/bin"; LD="$T/linkdir"; mkdir -p "$LD"
+inst() { USAGEBAR_SUPPORT_BIN="$SB" USAGEBAR_LINK_DIRS="$T/no-such-dir $LD" scripts/install-wrapper.sh "$OBSERVER" >/dev/null; }
+inst; rc=$?
+eq "설치 성공" "$rc" "0"
+check "래퍼·관측기 설치됨(실행 가능)" test -x "$SB/usagebar-claude" -a -x "$SB/usagebar"
+eq "설치 디렉터리 0700" "$(stat -f '%Lp' "$SB")" "700"
+check "래퍼 사본 = 레포 원본" cmp -s "$WRAPPER" "$SB/usagebar-claude"
+check "관측기 사본 = 빌드 산출물" cmp -s "$OBSERVER" "$SB/usagebar"
+eq "링크: 첫 쓰기 가능 디렉터리 → 고정 경로" "$(readlink "$LD/usagebar-claude")" "$SB/usagebar-claude"
+eq "임시 파일 남지 않음" "$(ls -A "$SB" | grep -c '^\.')" "0"
+INODE1="$(stat -f '%i' "$LD/usagebar-claude")"; W1="$(stat -f '%i' "$SB/usagebar-claude")"
+inst
+eq "재설치: 맞는 링크는 그대로(같은 inode)" "$(stat -f '%i' "$LD/usagebar-claude")" "$INODE1"
+check "재설치: 파일은 rename으로 교체(새 inode)" test "$(stat -f '%i' "$SB/usagebar-claude")" != "$W1"
+reset_data; write_active "$ACC" "$TOKEN"
+env -u CLAUDE_CODE_OAUTH_TOKEN HOME="$HOMEDIR" USAGEBAR_CLAUDE_REAL_BIN="$FAKE" USAGEBAR_CLAUDE_DIR="$DATA" \
+    USAGEBAR_OBSERVER_BIN="$SB/usagebar" FAKE_REPORT="$REPORT" FAKE_OUT="$STREAM" \
+    "$LD/usagebar-claude" -p --output-format stream-json hi </dev/null | cat > "$T/out.bin"
+check "링크로 실행 → 설치된 관측기 경유 통과" bash -c "cmp -s '$STREAM' '$T/out.bin' && test -s '$DATA/events.jsonl'"
+eq "링크로 실행 → 토큰 주입" "$(rep token)" "$TOKEN"
+
+# ════════════════════════════════════════════════════════════
 section "부가 시간 (가짜 claude, -p stream-json, 관측기 기동 포함)"
 SMALL="$T/small.jsonl"; head -n 3 "$STREAM" | grep -v '"assistant"' > "$SMALL"
 ms_now() { local ns; ns="$(date +%s%N)"; echo "${ns:0:13}"; }

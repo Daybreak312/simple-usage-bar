@@ -20,6 +20,9 @@ final class Poller: ObservableObject {
     private let store = AccountStore.shared
     private let active = ActiveAccountStore.shared
     private let history = UsageHistoryStore.shared
+    private let feed = ClaudeEventFeed.shared
+    /// Last daily rotation/retention pass over the wrapper logs.
+    private var lastLogMaintenance: Date?
     private var loopTask: Task<Void, Never>?
     /// Last seen utilization per account, for threshold-crossing detection.
     /// nil entry = no baseline yet (first poll after launch never alerts).
@@ -45,6 +48,7 @@ final class Poller: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 self?.reloadActive()
+                await self?.ingestWrapperEvents()
                 await self?.refreshDue()
             }
         }
@@ -150,6 +154,77 @@ final class Poller: ObservableObject {
         // own poll, so no follow-up refresh is needed.
         _ = await RollingEngine.evaluate(states: states, store: store)
         reloadActive()
+    }
+
+    // MARK: - Wrapper events (usagebar-claude → events.jsonl)
+
+    /// Fold new wrapper events into the board: each `rate_limit` is a usage
+    /// sample (and refreshes the snapshot when newer than the last probe); a
+    /// refusal on the active account (`rejected` / limit text) rolls at once.
+    /// Also runs the daily rotation of the wrapper logs.
+    func ingestWrapperEvents(now: Date = Date()) async {
+        let feed = self.feed
+        let maintain = lastLogMaintenance.map { now.timeIntervalSince($0) >= 86_400 } ?? true
+        if maintain { lastLogMaintenance = now }
+        let events = await Task.detached(priority: .utility) { () -> [WrapperEvent] in
+            var out = feed.readNew()
+            if maintain {
+                out += feed.maintain(now: now)
+                JSONLinesRotation.maintain(AppPaths.launchesURL, now: now)
+            }
+            return out
+        }.value
+        guard !events.isEmpty else { return }
+
+        let accounts = states.map(\.account)
+        var hashes: [String: UUID]?
+        let activeId = active.read()?.accountId
+        var changed = false
+        var refusal: WrapperEvent?
+        for event in events {
+            if event.accountId == nil || !accounts.contains(where: { $0.id == event.accountId }) {
+                hashes = hashes ?? tokenHashes(accounts)
+            }
+            guard let id = WrapperEventRules.resolve(event, accounts: accounts, hashes: hashes ?? [:]),
+                  let idx = states.firstIndex(where: { $0.account.id == id }) else { continue }
+            if case .rateLimit(let status, _, _, let five, let seven) = event.kind, five != nil || seven != nil {
+                history.record(UsageSample(accountId: id, ts: event.ts, sevenDay: seven?.percent,
+                                           fiveHour: five?.percent, status: status))
+            }
+            if let snap = WrapperEventRules.apply(event, to: states[idx].snapshot) {
+                states[idx].snapshot = snap
+                states[idx].staleNote = nil
+                changed = true
+            }
+            if WrapperEventRules.triggersImmediateRoll(event, accountId: id, activeId: activeId, now: now) {
+                refusal = event
+            }
+        }
+        var rolled = false
+        if let refusal {
+            let why: String
+            if case .limitText = refusal.kind { why = "한도 문구" } else { why = "한도 거절" }
+            rolled = await RollingEngine.evaluateImmediate(
+                states: states, store: store, reason: "\(why) — 실행 중 claude 관측")
+        }
+        if !rolled, changed {
+            // 이벤트로 갱신된 지표에도 정기 규칙(임계 95%·쿨다운)을 그대로 적용.
+            _ = await RollingEngine.evaluate(states: states, store: store)
+        }
+        if changed { fireThresholdAlerts() }
+        reloadActive()
+    }
+
+    /// tokenHash → 1-year-token account, for launches that ran with a
+    /// caller-supplied token instead of the active file.
+    private func tokenHashes(_ accounts: [Account]) -> [String: UUID] {
+        var out: [String: UUID] = [:]
+        for a in accounts where a.isClaudeToken {
+            if let token = store.secrets(for: a.id)?.accessToken, !token.isEmpty {
+                out[ClaudeProvider.tokenHash(token)] = a.id
+            }
+        }
+        return out
     }
 
     /// Compare against the previous poll and push webhook alerts for every

@@ -15,6 +15,9 @@ enum AppPaths {
         support.appendingPathComponent("claude", isDirectory: true)
     }
 
+    /// usagebar-claude's per-launch log (`scripts/usagebar-claude`).
+    static var launchesURL: URL { claudeDirectory.appendingPathComponent("launches.jsonl") }
+
     /// Creates `url` as 0700, and tightens it if it already existed looser.
     static func ensurePrivateDirectory(_ url: URL) throws {
         try FileManager.default.createDirectory(
