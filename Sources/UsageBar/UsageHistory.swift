@@ -123,6 +123,19 @@ final class UsageHistoryStore: @unchecked Sendable {
         }
     }
 
+    /// 보존 기간 안 가장 오래된 표본 시각 — `key`를 주면 그 계정, 없으면 전
+    /// 계정(= 사용률 기록 시작). 기록이 없으면 nil.
+    func firstSampleDate(key: String? = nil) -> Date? {
+        let account = key.flatMap(AccountKey.normalize)
+        if key != nil, account == nil { return nil }
+        return queue.sync {
+            let cutoff = retentionCutoff()
+            let all = loadLocked()
+            let series = account.map { all[$0].map { [$0] } ?? [] } ?? Array(all.values)
+            return series.compactMap { $0.first { $0.ts >= cutoff }?.ts }.min()
+        }
+    }
+
     /// 병합·보존 기간 내 표본만으로 파일 재작성.
     func compact() {
         queue.sync {
