@@ -103,6 +103,10 @@ final class Poller: ObservableObject {
             for await (id, result) in group {
                 guard let idx = states.firstIndex(where: { $0.account.id == id }) else { continue }
                 var delay = normalInterval
+                // 사용률 이력: 성공한 Claude 조회만 계정 이메일 키로 쌓는다.
+                if let sample = UsageSample(account: states[idx].account, result: result) {
+                    UsageHistoryStore.shared.record(sample)
+                }
                 switch result {
                 case .success(let usage):
                     states[idx].snapshot = usage

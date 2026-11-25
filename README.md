@@ -12,6 +12,7 @@ Codex  | example-two@gmail.com  5h [=---------] 12%  7d [===-------] 33%
 
 ```bash
 swift build                     # 개발 빌드
+swift test                      # 단위 테스트
 .build/debug/usagebar           # GUI (메뉴바 아이콘)
 scripts/make-app.sh --install   # /Applications/SimpleUsageBar.app 설치
 ```
@@ -101,6 +102,16 @@ rm -rf /tmp/cx
 
 - `~/Library/Application Support/UsageBar/accounts.json` — 계정 메타 (비밀 없음)
 - `~/Library/Application Support/UsageBar/secrets.json` — 토큰 (chmod 600, `~/.codex/auth.json`과 동일한 보안 수준)
+- `~/Library/Application Support/UsageBar/claude/` (0700) — Claude 관측 기록 (토큰 없음, 파일 0600)
+  - `usage-history.jsonl` — 계정 사용률 이력. Claude 계정 조회가 **성공할 때마다**
+    `{"v":1,"ts":<ms>,"key":<이메일 소문자>,"fiveHour":<0~100|null>,"sevenDay":<0~100|null>}` 1줄.
+    키는 계정 이메일이라 같은 사람의 저장 행·로컬 행이 한 이력으로 합쳐진다(로컬 행은 그
+    조회에서 확인된 로그인 이메일, 확인 못 하면 기록하지 않음). 실패·429로 이전 값을 유지한
+    조회, 섀도 처리된 행, Codex는 기록하지 않는다. 같은 계정의 3분 버킷 안 표본은 최신 것
+    하나로 합치고, 400일 지난 표본은 정리 때 지운다.
+  - `roll-history.jsonl` — 키체인 로그인 교체 기록. 교체가 확정(키체인 재검증 통과)된
+    뒤에만 `{"v":1,"ts":<ms>,"from":<이메일|null>,"to":<이메일>,"reason":…}` 1줄.
+    자동 롤링·팝오버 전환·`usagebar roll` 모두 기록되고 `--dry-run`·실패·원복은 기록되지 않는다. 400일 보존.
 - 폴링: 계정별 독립 스케줄 — 사용량과 무관하게 평탄한 3분 주기.
   오버라이드: `pollIntervalSeconds`(기본 180) defaults 키
 
