@@ -90,6 +90,14 @@ struct MenuView: View {
                 .help("계정 추가")
 
                 Button {
+                    ChartWindowController.shared.showMac()
+                } label: {
+                    Image(systemName: "chart.bar.xaxis")
+                }
+                .buttonStyle(.borderless)
+                .help("이 맥 사용량")
+
+                Button {
                     screen = .settings
                 } label: {
                     Image(systemName: "gearshape")
@@ -237,6 +245,12 @@ struct AccountRow: View {
                     .buttonStyle(.borderless)
                     .help("계정 제거")
                 }
+
+                // 항상 보이는 「자세히」 — 호버 컨트롤이 왼쪽에 나타나도 자리가
+                // 바뀌지 않게 맨 끝에 둔다. Claude 행만 (Codex 그래프 없음).
+                if state.account.provider == .claude {
+                    detailButton
+                }
             }
 
             if let error = state.lastError {
@@ -264,6 +278,28 @@ struct AccountRow: View {
         .onHover {
             hovering = $0
             if !$0 { confirmingSwitch = false }
+        }
+    }
+
+    /// 계정 사용률 창 버튼. 이메일을 모르면 이력 키가 없어 비활성 — 비활성
+    /// 버튼은 툴팁이 뜨지 않아 같은 모양의 아이콘에 이유를 단다.
+    @ViewBuilder
+    private var detailButton: some View {
+        if let key = state.usageKey {
+            Button {
+                ChartWindowController.shared.showAccount(key: key, poller: poller)
+            } label: {
+                Image(systemName: "chart.xyaxis.line")
+                    .font(.system(size: 10))
+            }
+            .buttonStyle(.borderless)
+            .help("자세히")
+        } else {
+            Image(systemName: "chart.xyaxis.line")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .help("자세히 — 이 계정의 이메일을 아직 몰라 사용률 기록을 찾을 수 없습니다 (조회가 성공하면 열립니다)")
+                .accessibilityLabel("자세히 (사용 불가)")
         }
     }
 

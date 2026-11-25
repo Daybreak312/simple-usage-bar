@@ -109,13 +109,13 @@ enum RollingEngine {
         // 1) 현 활성 계보 회수. 이메일을 특정 못 하면 계보 보존이 불가능하므로
         //    롤링 자체를 중단한다 (덮어쓰는 순간 그 계정 재로그인 필요해짐).
         let current = try? ClaudeProvider.readLocalCLIItem()
+        var fromEmail = activeEmail
         if let current {
-            var email = activeEmail
-            if email == nil, let token = current.oauth["accessToken"] as? String {
-                email = try? await ClaudeProvider()
+            if fromEmail == nil, let token = current.oauth["accessToken"] as? String {
+                fromEmail = try? await ClaudeProvider()
                     .resolveLabel(secrets: AccountSecrets(accessToken: token))
             }
-            guard let email else {
+            guard let email = fromEmail else {
                 throw UsageBarError.invalidCredentials("활성 계정 식별 실패 — 계보 보존이 안 되므로 롤링 중단")
             }
             try harvest(email: email, item: current, store: store)
@@ -142,6 +142,8 @@ enum RollingEngine {
 
         lastRollAt = Date()
         notifiedExhausted = false
+        // 교체 확정 후에만 기록 (실패·원복 경로는 위에서 throw로 빠져나감).
+        RollHistoryStore.shared.record(from: fromEmail, to: target.email, reason: reason)
 
         let header = "[>] 계정 롤링: \(activeEmail ?? "?") → \(target.email) (\(reason))"
         LocalNotifier.send(title: header, body: "Claude Code 로그인이 교체되었습니다.")

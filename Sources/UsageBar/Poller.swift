@@ -38,6 +38,8 @@ final class Poller: ObservableObject {
             // 15s tick; each account fires when its own due time passes.
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
+                // 사용량 장부: 세션 기록 증분 집계(백그라운드, 1분 이내 주기).
+                LedgerScanner.shared.scanIfDue()
                 await self?.refreshDue()
             }
         }
@@ -103,6 +105,10 @@ final class Poller: ObservableObject {
             for await (id, result) in group {
                 guard let idx = states.firstIndex(where: { $0.account.id == id }) else { continue }
                 var delay = normalInterval
+                // 사용률 이력: 성공한 Claude 조회만 계정 이메일 키로 쌓는다.
+                if let sample = UsageSample(account: states[idx].account, result: result) {
+                    UsageHistoryStore.shared.record(sample)
+                }
                 switch result {
                 case .success(let usage):
                     states[idx].snapshot = usage
