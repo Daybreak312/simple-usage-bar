@@ -15,6 +15,18 @@ enum ChartPeriod: Int, CaseIterable, Identifiable {
     var id: Int { rawValue }
     var days: Int { rawValue }
     var label: String { "\(rawValue)일" }
+
+    /// 계정 사용률 그래프의 한 점이 덮는 시간. 표본은 계정당 3분에 하나라 원본을
+    /// 그대로 그리면 계열당 30일 약 1.4만·90일 약 4.3만 점이 되고, 그래프가 메인
+    /// 스레드에서 그만큼의 마크를 그린다. 구간마다 최고값 하나로 줄여 계열당 약
+    /// 700점 이하로 묶는다(최고값이라 95% 롤링 임계 근접이 묻히지 않는다).
+    var usageBucket: TimeInterval {
+        switch self {
+        case .week: return 15 * 60
+        case .month: return 3600
+        case .quarter: return 3 * 3600
+        }
+    }
 }
 
 /// 기간의 로컬 하루: 장부 키와 그날 자정.
@@ -226,13 +238,32 @@ struct AccountUsageInput {
 }
 
 /// 계정 사용률 창이 그리는 모든 것.
-struct AccountUsageData {
+struct AccountUsageData: Equatable {
     struct UsagePoint: Equatable, Identifiable {
         enum Window: String { case sevenDay = "7d", fiveHour = "5h" }
         var ts: Date
         var window: Window
         var percent: Double
+        /// 같은 창 안에서 표본 공백(앱 종료·잠자기)으로 끊긴 선 조각 번호.
+        var segment: Int = 0
         var id: String { "\(window.rawValue)|\(ts.timeIntervalSince1970)" }
+        /// 그래프 선 계열 — 공백에서 선이 이어지지 않게 조각마다 다르다.
+        var series: String { "\(window.rawValue)#\(segment)" }
+    }
+
+    /// 그래프 x 위치의 호버 값 — 그 위치에서 가장 가까운 점의 구간과, 같은 구간의
+    /// 7d·5h 점.
+    struct Hover: Equatable {
+        /// 가장 가까운 점의 시각 (세로선 위치).
+        var anchor: Date
+        /// 그 점이 대표하는 구간 (`usageBucket`).
+        var span: DateInterval
+        var sevenDay: UsagePoint?
+        var fiveHour: UsagePoint?
+        /// 교체 기록으로 확인된 활성 구간 안이다.
+        var active: Bool
+
+        var points: [UsagePoint] { [sevenDay, fiveHour].compactMap { $0 } }
     }
 
     struct RollEvent: Equatable, Identifiable {
@@ -261,9 +292,15 @@ struct AccountUsageData {
     /// 기간 경계: 첫날 자정 … 지금.
     let rangeStart: Date
     let rangeEnd: Date
-    /// 기간 안 표본, 오래된 것부터. 5h는 값이 있을 때만.
-    let usage: [UsagePoint]
-    /// 기간 내 7d 최고값 (같은 값이면 최근 것).
+    /// 한 점이 덮는 시간 (`ChartPeriod.usageBucket`).
+    let bucket: TimeInterval
+    /// 기간 안 7d 점 — 구간별 최고값으로 줄인 것, 오래된 것부터.
+    let sevenDay: [UsagePoint]
+    /// 기간 안 5h 점 (값이 있는 표본만) — 같은 규칙.
+    let fiveHour: [UsagePoint]
+    /// 앞뒤가 공백이라 선으로 그려지지 않는 외톨이 점 (점으로 따로 찍는다).
+    let isolated: [UsagePoint]
+    /// 기간 내 7d 최고값 (같은 값이면 최근 것) — 줄이기 전 원본 표본에서.
     let peakSevenDay: Peak?
     /// 기간 안 교체 시점 (이 계정으로 / 이 계정에서).
     let rollEvents: [RollEvent]
@@ -281,21 +318,48 @@ struct AccountUsageData {
         rangeEnd = now
         firstSampleAt = input.firstSampleAt
         historyStartedAt = input.historyStartedAt
-        usage = Self.usagePoints(input.samples, key: input.key, from: rangeStart, to: now)
-        peakSevenDay = usage.filter { $0.window == .sevenDay }
-            .max { $0.percent < $1.percent || ($0.percent == $1.percent && $0.ts < $1.ts) }
-            .map { Peak(ts: $0.ts, percent: $0.percent) }
+        bucket = period.usageBucket
+        let raw = Self.usagePoints(input.samples, key: input.key, from: rangeStart, to: now)
+        let rawSeven = raw.filter { $0.window == .sevenDay }
+        peakSevenDay = rawSeven.max(by: Self.lowerThenOlder).map { Peak(ts: $0.ts, percent: $0.percent) }
+        let gap = Self.maxGap(bucket: bucket)
+        sevenDay = Self.segmented(Self.downsampled(rawSeven, bucket: bucket), maxGap: gap)
+        fiveHour = Self.segmented(Self.downsampled(raw.filter { $0.window == .fiveHour }, bucket: bucket),
+                                  maxGap: gap)
+        isolated = Self.isolatedPoints(sevenDay) + Self.isolatedPoints(fiveHour)
         rollEvents = Self.rollEvents(input.rolls, key: input.key, from: rangeStart, to: now)
         activeIntervals = Self.activeIntervals(rolls: input.rolls, key: input.key,
                                                activeNow: input.activeNow, from: rangeStart, to: now)
     }
 
-    var hasFiveHour: Bool { usage.contains { $0.window == .fiveHour } }
+    /// 그릴 점 전부 (7d 다음 5h).
+    var usage: [UsagePoint] { sevenDay + fiveHour }
 
-    /// 그래프 x 위치에 가장 가까운 표본 (호버).
+    var hasFiveHour: Bool { !fiveHour.isEmpty }
+
+    /// 그래프 x 위치에 가장 가까운 점 (이진 탐색).
     func usageSample(near date: Date, window: UsagePoint.Window = .sevenDay) -> UsagePoint? {
-        usage.filter { $0.window == window }
-            .min { abs($0.ts.timeIntervalSince(date)) < abs($1.ts.timeIntervalSince(date)) }
+        Self.nearest(window == .sevenDay ? sevenDay : fiveHour, to: date)
+    }
+
+    /// 그래프 x 위치의 호버 값. 가장 가까운 점(7d·5h 중)의 구간을 잡고, 같은 구간의
+    /// 다른 창 점을 붙인다 — 두 창의 최고값은 구간 안 서로 다른 표본일 수 있다.
+    func hover(at date: Date) -> Hover? {
+        let candidates = [usageSample(near: date), usageSample(near: date, window: .fiveHour)]
+            .compactMap { $0 }
+        guard let anchor = candidates.min(by: {
+            abs($0.ts.timeIntervalSince(date)) < abs($1.ts.timeIntervalSince(date))
+        }) else { return nil }
+        let index = Self.bucketIndex(anchor.ts, bucket: bucket)
+        func inBucket(_ window: UsagePoint.Window) -> UsagePoint? {
+            usageSample(near: anchor.ts, window: window)
+                .flatMap { Self.bucketIndex($0.ts, bucket: bucket) == index ? $0 : nil }
+        }
+        return Hover(anchor: anchor.ts,
+                     span: DateInterval(start: Date(timeIntervalSince1970: Double(index) * bucket),
+                                        duration: bucket),
+                     sevenDay: inBucket(.sevenDay), fiveHour: inBucket(.fiveHour),
+                     active: activeIntervals.contains { $0.contains(anchor.ts) })
     }
 
     /// 표본이 없을 때의 안내 (nil = 그릴 표본이 있다).
@@ -327,6 +391,70 @@ struct AccountUsageData {
     }
 
     static func clampPercent(_ v: Double) -> Double { min(max(v, 0), 100) }
+
+    /// 최고값 비교 — 낮은 값이 먼저, 같으면 오래된 것이 먼저(= max는 최근 것).
+    static func lowerThenOlder(_ a: UsagePoint, _ b: UsagePoint) -> Bool {
+        a.percent < b.percent || (a.percent == b.percent && a.ts < b.ts)
+    }
+
+    /// 시각이 속한 구간 번호 (epoch 기준 `bucket`초 단위).
+    static func bucketIndex(_ ts: Date, bucket: TimeInterval) -> Int {
+        Int((ts.timeIntervalSince1970 / bucket).rounded(.down))
+    }
+
+    /// 한 창의 점(시각순)을 구간마다 최고값 하나로 줄인다 — 같은 값이면 최근 것.
+    /// 점은 실제 표본의 시각·값을 그대로 쓴다(구간 대표 시각을 지어내지 않는다).
+    static func downsampled(_ points: [UsagePoint], bucket: TimeInterval) -> [UsagePoint] {
+        var out: [UsagePoint] = []
+        var current: Int?
+        for p in points {
+            let index = bucketIndex(p.ts, bucket: bucket)
+            if index == current, let last = out.last {
+                if lowerThenOlder(last, p) { out[out.count - 1] = p }
+            } else {
+                out.append(p)
+                current = index
+            }
+        }
+        return out
+    }
+
+    /// 선을 끊는 표본 공백. 구간 최고값끼리는 최대 2구간 가까이 떨어질 수 있어
+    /// 3구간(최소 30분)을 넘는 틈만 공백으로 본다.
+    static func maxGap(bucket: TimeInterval) -> TimeInterval { max(3 * bucket, 30 * 60) }
+
+    /// 이웃 점 사이가 `maxGap`을 넘으면 새 조각 번호를 매긴다.
+    static func segmented(_ points: [UsagePoint], maxGap: TimeInterval) -> [UsagePoint] {
+        var segment = 0
+        var previous: Date?
+        return points.map { p in
+            if let prev = previous, p.ts.timeIntervalSince(prev) > maxGap { segment += 1 }
+            previous = p.ts
+            var q = p
+            q.segment = segment
+            return q
+        }
+    }
+
+    /// 점 하나뿐인 조각 — 선으로는 보이지 않는다.
+    static func isolatedPoints(_ points: [UsagePoint]) -> [UsagePoint] {
+        let counts = Dictionary(grouping: points, by: \.segment).mapValues(\.count)
+        return points.filter { counts[$0.segment] == 1 }
+    }
+
+    /// 시각순 배열에서 `date`에 가장 가까운 점 (같은 거리면 이른 것).
+    static func nearest(_ points: [UsagePoint], to date: Date) -> UsagePoint? {
+        var lo = 0, hi = points.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if points[mid].ts < date { lo = mid + 1 } else { hi = mid }
+        }
+        let before = lo > 0 ? points[lo - 1] : nil
+        let after = lo < points.count ? points[lo] : nil
+        guard let b = before else { return after }
+        guard let a = after else { return b }
+        return a.ts.timeIntervalSince(date) < date.timeIntervalSince(b.ts) ? a : b
+    }
 
     /// `from…to` 안에서 이 계정으로 교체된 시점과 이 계정에서 빠져나간 시점.
     /// 같은 계정으로의 교체(from == to)는 변화가 없어 빼낸다.
@@ -430,6 +558,26 @@ enum ChartFormat {
 
     static func timeLabel(_ date: Date, timeZone: TimeZone) -> String {
         format(date, "M월 d일 HH:mm", timeZone)
+    }
+
+    /// `15분`, `1시간`, `3시간`.
+    static func duration(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        return minutes % 60 == 0 ? "\(minutes / 60)시간" : "\(minutes)분"
+    }
+
+    /// 계정 사용률 호버 줄: `11월 19일 14:00–15:00 · 7d 62% · 5h 41% · 활성`.
+    static func usageHover(_ h: AccountUsageData.Hover, timeZone: TimeZone) -> String {
+        var parts = ["\(timeLabel(h.span.start, timeZone: timeZone))–\(format(h.span.end, "HH:mm", timeZone))"]
+        if let seven = h.sevenDay { parts.append("7d \(percent(seven.percent))") }
+        if let five = h.fiveHour { parts.append("5h \(percent(five.percent))") }
+        if h.active { parts.append("활성") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// 계정 사용률 그래프 해상도 안내.
+    static func bucketNote(_ period: ChartPeriod) -> String {
+        "한 점 = \(duration(period.usageBucket)) 구간의 최고값 (3분 간격 기록을 줄여 그립니다)"
     }
 
     private static func format(_ date: Date, _ pattern: String, _ timeZone: TimeZone) -> String {

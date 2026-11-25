@@ -186,7 +186,7 @@ final class ChartDataTests: XCTestCase {
     func testUsagePointsFilteredByKeyClippedSortedClamped() {
         let start = ChartDay.period(count: 7, endingAt: now, timeZone: seoul).first!.start
         let samples = [
-            sample(600, seven: 62),
+            sample(1800, seven: 62),
             sample(3600, seven: 60),
             UsageSample(key: me, ts: start.addingTimeInterval(-1), fiveHour: nil, sevenDay: 1),  // 기간 이전
             sample(30, seven: 99, key: other),                                                        // 다른 계정
@@ -195,7 +195,7 @@ final class ChartDataTests: XCTestCase {
         let d = account(samples: samples)
         XCTAssertEqual(d.usage.map(\.percent), [60, 62, 100])
         XCTAssertFalse(d.hasFiveHour)
-        XCTAssertEqual(d.usageSample(near: now.addingTimeInterval(-900))?.percent, 62)
+        XCTAssertEqual(d.usageSample(near: now.addingTimeInterval(-1700))?.percent, 62)
         XCTAssertEqual(d.peakSevenDay, .init(ts: now.addingTimeInterval(-60), percent: 100))
         XCTAssertNil(d.emptyNotice)
 
@@ -204,6 +204,107 @@ final class ChartDataTests: XCTestCase {
         XCTAssertEqual(withFive.usage.map(\.window), [.sevenDay, .fiveHour, .fiveHour])
         XCTAssertEqual(withFive.peakSevenDay?.percent, 50)
         XCTAssertEqual(withFive.usageSample(near: now, window: .fiveHour)?.percent, 10)
+    }
+
+    /// 실제 밀도: 계정당 3분에 표본 하나 (`Poller.normalInterval` 180초, 이력 3분 병합).
+    func denseSamples(days: Int, seven: (Int) -> Double = { Double($0 % 90) },
+                      five: (Int) -> Double? = { Double($0 % 50) }) -> [UsageSample] {
+        let count = days * 480
+        return (0...count).map { i in
+            sample(Double(count - i) * 180, seven: seven(i), five: five(i))
+        }
+    }
+
+    func testRealDensityIsBoundedPerPeriod() {
+        // 90일 × 3분 = 계열당 43,200 표본 → 3시간 구간 = 계열당 약 720점.
+        for period in ChartPeriod.allCases {
+            let d = account(samples: denseSamples(days: period.days), period)
+            // 기간 = 첫날 자정 … 지금 → 구간 수만큼 (경계 걸침 +1).
+            let buckets = Int(d.rangeEnd.timeIntervalSince(d.rangeStart) / period.usageBucket)
+            XCTAssertLessThanOrEqual(d.sevenDay.count, buckets + 1, "\(period)")
+            XCTAssertLessThanOrEqual(d.fiveHour.count, buckets + 1, "\(period)")
+            XCTAssertGreaterThanOrEqual(d.sevenDay.count, buckets, "\(period)")  // 빈 구간 없이 채워진다
+            XCTAssertLessThanOrEqual(d.usage.count, 2 * 721)
+            XCTAssertEqual(Set(d.usage.map(\.segment)), [0])  // 공백 없음 → 한 조각
+            XCTAssertTrue(d.isolated.isEmpty)
+        }
+    }
+
+    func testDownsampleKeepsBucketMaximumAndRawPeak() {
+        // 1시간 구간(30일) 10:00–11:00 KST에 3분 표본 20개, 그중 하나만 96% — 구간 대표로 살아남는다.
+        let base = 5 * 3600.0  // now - 5h = 10:00 KST (구간 경계)
+        var samples = (0..<20).map { sample(base - Double($0) * 180, seven: 40) }
+        samples[7] = sample(base - 7 * 180, seven: 96)
+        samples.append(sample(base + 600, seven: 97))  // 09:50 — 앞 구간
+        let d = account(samples: samples, .month)
+        XCTAssertEqual(d.sevenDay.map(\.percent), [97, 96])
+        XCTAssertEqual(d.sevenDay[1].ts, now.addingTimeInterval(-(base - 7 * 180)))  // 실제 표본 시각
+        XCTAssertEqual(d.peakSevenDay, .init(ts: now.addingTimeInterval(-(base + 600)), percent: 97))
+
+        // 같은 구간에 같은 최고값이면 최근 것.
+        let tie = AccountUsageData.downsampled(
+            [.init(ts: Date(timeIntervalSince1970: 0), window: .sevenDay, percent: 50),
+             .init(ts: Date(timeIntervalSince1970: 600), window: .sevenDay, percent: 50),
+             .init(ts: Date(timeIntervalSince1970: 1200), window: .sevenDay, percent: 10)],
+            bucket: 3600)
+        XCTAssertEqual(tie.map(\.ts), [Date(timeIntervalSince1970: 600)])
+    }
+
+    func testGapsSplitLineAndMarkIsolatedPoints() {
+        // 7일(15분 구간, 공백 기준 45분): 표본 3시간 → 8시간 잠자기 → 표본 하나 → 2시간 공백 → 다시.
+        var samples = (0..<60).map { sample(20 * 3600 - Double($0) * 180, seven: 30) }
+        samples.append(sample(9 * 3600, seven: 31, five: 5))           // 외톨이
+        samples += (0..<20).map { sample(6 * 3600 - Double($0) * 180, seven: 32) }
+        let d = account(samples: samples)
+        XCTAssertEqual(Set(d.sevenDay.map(\.segment)), [0, 1, 2])
+        XCTAssertEqual(d.sevenDay.filter { $0.segment == 1 }.map(\.percent), [31])
+        XCTAssertEqual(d.isolated.map(\.percent), [31, 5])  // 7d 외톨이 + 5h 단독 점
+        XCTAssertEqual(Set(d.usage.map(\.series)), ["7d#0", "7d#1", "7d#2", "5h#0"])
+        XCTAssertEqual(AccountUsageData.maxGap(bucket: ChartPeriod.week.usageBucket), 45 * 60)
+        XCTAssertEqual(AccountUsageData.maxGap(bucket: ChartPeriod.quarter.usageBucket), 9 * 3600)
+    }
+
+    func testHoverPicksNearestBucketWithBothWindows() {
+        // 30일(1시간 구간). 14:00–15:00 KST 구간: 7d 최고는 14:06, 5h 최고는 14:45.
+        let h14 = 3600.0  // now(15:00) - 1h = 14:00
+        let samples = [
+            sample(h14 - 6 * 60, seven: 70, five: 10),
+            sample(h14 - 45 * 60, seven: 60, five: 40),
+            sample(h14 + 30 * 60, seven: 50, five: nil),  // 13:30 — 앞 구간, 5h 없음
+        ]
+        let d = account(samples: samples, rolls: [roll(h14 + 600, from: other, to: me)], activeNow: true, .month)
+        let h = try! XCTUnwrap(d.hover(at: now.addingTimeInterval(-h14 + 8 * 60)))  // 14:08
+        XCTAssertEqual(h.anchor, now.addingTimeInterval(-h14 + 6 * 60))
+        XCTAssertEqual(h.span, DateInterval(start: now.addingTimeInterval(-h14), duration: 3600))
+        XCTAssertEqual(h.sevenDay?.percent, 70)
+        XCTAssertEqual(h.fiveHour?.percent, 40)
+        XCTAssertTrue(h.active)
+        XCTAssertEqual(ChartFormat.usageHover(h, timeZone: seoul), "11월 19일 14:00–15:00 · 7d 70% · 5h 40% · 활성")
+
+        // 13:30 쪽: 그 구간엔 5h 점이 없다 — 옆 구간 5h를 끌어오지 않는다.
+        let early = try! XCTUnwrap(d.hover(at: now.addingTimeInterval(-h14 - 25 * 60)))
+        XCTAssertEqual(early.sevenDay?.percent, 50)
+        XCTAssertNil(early.fiveHour)
+        XCTAssertFalse(early.active)
+        XCTAssertEqual(ChartFormat.usageHover(early, timeZone: seoul), "11월 19일 13:00–14:00 · 7d 50%")
+
+        XCTAssertNil(account().hover(at: now))
+    }
+
+    func testNearestIsBinarySearchOverSortedPoints() {
+        let pts = [0.0, 100, 200, 300].map {
+            AccountUsageData.UsagePoint(ts: Date(timeIntervalSince1970: $0), window: .sevenDay, percent: $0)
+        }
+        func near(_ t: Double) -> Double? { AccountUsageData.nearest(pts, to: Date(timeIntervalSince1970: t))?.percent }
+        XCTAssertEqual(near(-50), 0)
+        XCTAssertEqual(near(140), 100)
+        XCTAssertEqual(near(160), 200)
+        XCTAssertEqual(near(150), 100)  // 같은 거리 → 이른 것
+        XCTAssertEqual(near(999), 300)
+        XCTAssertNil(AccountUsageData.nearest([], to: Date()))
+        XCTAssertEqual(ChartFormat.duration(900), "15분")
+        XCTAssertEqual(ChartFormat.duration(10_800), "3시간")
+        XCTAssertEqual(ChartFormat.bucketNote(.month), "한 점 = 1시간 구간의 최고값 (3분 간격 기록을 줄여 그립니다)")
     }
 
     func testPeakIsHighestInPeriodLatestOnTie() {
@@ -325,7 +426,8 @@ final class ChartDataTests: XCTestCase {
 
         var local = AccountState(account: Account(provider: .claude, kind: .localClaudeCLI,
                                                   label: "old@example.com (로컬)"))
-        XCTAssertEqual(local.usageKey, "old@example.com")
+        // 저장된 라벨은 이전 로그인의 것일 수 있다 — 조회로 해석되기 전엔 비활성.
+        XCTAssertNil(local.usageKey)
         local.snapshot = snapshot(seven: 10, resolved: "new@example.com (로컬)")
         XCTAssertEqual(local.usageKey, "new@example.com")  // 지금 해석된 이메일
 
@@ -414,14 +516,21 @@ final class ChartSnapshotTests: XCTestCase {
     func testRenderAccountUsageFixture() throws {
         let dir = try outputDir()
         let me = "me@example.com", other = "other@example.com"
+        // 실제 밀도(계정당 3분에 하나) 30일 — 1시간 구간 최고값으로 줄여 그린다.
         var samples: [UsageSample] = []
         var pct = 5.0
-        for h in stride(from: 24 * 30, through: 0, by: -1) {
-            let ts = now.addingTimeInterval(-Double(h) * 3600)
-            pct += Double((h * 13) % 7) * 0.09
-            if h == 24 * 22 || h == 24 * 15 || h == 24 * 8 || h == 24 + 5 { pct = 3 }  // 주간 리셋
-            let five = Double((h * 7) % 60) + (h % 5 == 0 ? 30 : 0)
-            samples.append(UsageSample(key: me, ts: ts, fiveHour: min(five, 100), sevenDay: min(pct, 99)))
+        let count = 30 * 480
+        for i in 0...count {
+            let ago = Double(count - i) * 180
+            let h = Int(ago / 3600)
+            if h >= 24 * 12 && h < 24 * 12 + 9 { continue }  // 맥 잠자기 9시간 — 선이 끊긴다
+            pct += Double((i * 13) % 7) * 0.0045
+            if [24 * 22, 24 * 15, 24 * 8, 24 + 5].contains(h) && ago.truncatingRemainder(dividingBy: 3600) == 0 {
+                pct = 3  // 주간 리셋
+            }
+            let five = Double((i / 20) % 60) + Double(i % 7)
+            samples.append(UsageSample(key: me, ts: now.addingTimeInterval(-ago), fiveHour: min(five, 100),
+                                       sevenDay: min(pct, 99)))
         }
         let rolls = [
             RollRecord(ts: now.addingTimeInterval(-25 * 86_400), from: other, to: me, reason: "7d 95%"),

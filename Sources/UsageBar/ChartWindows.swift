@@ -67,12 +67,12 @@ final class ChartWindowController: NSObject, NSWindowDelegate {
 }
 
 extension AccountState {
-    /// 사용률 이력의 계정 키 (Claude 행만). 로컬 행은 이번 조회에서 해석된
-    /// 이메일을 우선한다 — 키체인 로그인을 따라 사람이 바뀌기 때문.
+    /// 사용률 이력의 계정 키 (Claude 행만) — 표본 키(`UsageSample(account:result:)`)와
+    /// 같은 규칙. 로컬 행은 조회에서 해석된 이메일만 쓴다: 키체인 로그인을 따라
+    /// 사람이 바뀌어 저장된 라벨은 이전 로그인의 것일 수 있다.
     var usageKey: String? {
         guard account.provider == .claude else { return nil }
-        let source = account.kind == .localClaudeCLI
-            ? (snapshot?.resolvedLabel ?? account.email) : account.email
+        let source = account.kind == .localClaudeCLI ? snapshot?.resolvedLabel : account.email
         return AccountKey.normalize(source)
     }
 }
@@ -371,7 +371,7 @@ struct AccountUsageContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             AccountUsageSummary(data: data, snapshot: snapshot, hasLiveRow: hasLiveRow)
-            AccountUsageChart(data: data)
+            AccountUsageChart(data: data).equatable()
             Text("토큰·비용은 계정별로 나누지 않습니다 — 팝오버의 『이 맥 사용량』에서 볼 수 있습니다")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -419,12 +419,29 @@ struct AccountUsageSummary: View {
     }
 }
 
-struct AccountUsageChart: View {
+/// 그래프 호버 값 — 그래프 본체는 이것을 관찰하지 않고(`@State`로 참조만 쥔다),
+/// 호버 줄·선택 표시 같은 작은 뷰만 관찰한다. 마우스가 움직여도 수백 개의 선
+/// 마크를 다시 만들지 않는다.
+@MainActor
+final class ChartHoverState<Value: Equatable>: ObservableObject {
+    @Published private(set) var value: Value?
+
+    /// 값이 바뀔 때만 알린다 — 같은 구간 안의 마우스 이동은 아무것도 다시 그리지 않는다.
+    func set(_ new: Value?) {
+        if new != value { value = new }
+    }
+}
+
+struct AccountUsageChart: View, Equatable {
     let data: AccountUsageData
-    @State private var selected: Date?
+    @State private var hover = ChartHoverState<AccountUsageData.Hover>()
 
     private static let rolledIn = "이 계정으로 교체"
     private static let rolledOut = "다른 계정으로 교체"
+
+    /// 데이터가 같으면 다시 그리지 않는다 — 창은 폴링 결과마다(계정별 3분) 다시
+    /// 그려지는데, 그래프 데이터는 1분 갱신 때만 바뀐다.
+    nonisolated static func == (a: Self, b: Self) -> Bool { a.data == b.data }
 
     /// 범례 계열 — 있는 것만 (없는 계열이 범례에 남지 않게).
     private var series: [(String, Color)] {
@@ -444,12 +461,14 @@ struct AccountUsageChart: View {
             if let notice = data.emptyNotice {
                 ChartNotice(text: notice)
             } else {
-                ChartHoverLine(text: hoverText)
+                AccountUsageHoverLine(timeZone: data.timeZone, hover: hover)
                 chart
                     .frame(minHeight: 220)
                 legendNotes
             }
         }
+        // 기간이 바뀌면 이전 기간의 호버 값을 버린다.
+        .onChange(of: data.period) { hover.set(nil) }
     }
 
     private var chart: some View {
@@ -467,9 +486,14 @@ struct AccountUsageChart: View {
             }
             ForEach(data.usage) { p in
                 LineMark(x: .value("시각", p.ts), y: .value("사용률", p.percent),
-                         series: .value("창", p.window.rawValue))
+                         series: .value("조각", p.series))
                     .foregroundStyle(by: .value("구분", p.window.rawValue))
                     .lineStyle(StrokeStyle(lineWidth: 2))
+            }
+            ForEach(data.isolated) { p in
+                PointMark(x: .value("시각", p.ts), y: .value("사용률", p.percent))
+                    .foregroundStyle(by: .value("구분", p.window.rawValue))
+                    .symbolSize(16)
             }
             RuleMark(y: .value("롤링 임계", RollingEngine.threshold))
                 .foregroundStyle(ChartPalette.threshold.opacity(0.8))
@@ -477,12 +501,6 @@ struct AccountUsageChart: View {
                 .annotation(position: .bottom, alignment: .leading) {
                     Text("롤링 \(Int(RollingEngine.threshold))%").font(.caption2).foregroundStyle(.secondary)
                 }
-            if let p = selectedPoint {
-                RuleMark(x: .value("선택", p.ts)).foregroundStyle(Color.secondary.opacity(0.5))
-                PointMark(x: .value("선택", p.ts), y: .value("사용률", p.percent))
-                    .symbolSize(60)
-                    .foregroundStyle(Color.primary)
-            }
         }
         .chartForegroundStyleScale(domain: series.map(\.0), range: series.map(\.1))
         .chartLegend(series.count > 1 ? .visible : .hidden)
@@ -500,11 +518,20 @@ struct AccountUsageChart: View {
                 AxisValueLabel(format: .dateTime.month(.defaultDigits).day())
             }
         }
-        .chartXSelection(value: $selected)
+        // 호버는 그래프 위 별도 층 — `chartXSelection`은 선택 표시를 같은 `Chart`
+        // 안에 그려야 해서 마우스 이동마다 모든 마크를 다시 만든다.
+        .chartOverlay { proxy in
+            GeometryReader { geo in
+                AccountUsageHoverLayer(data: data, proxy: proxy,
+                                       plot: proxy.plotFrame.map { geo[$0] } ?? .zero, hover: hover)
+            }
+        }
     }
 
     @ViewBuilder
     private var legendNotes: some View {
+        Text(ChartFormat.bucketNote(data.period))
+            .font(.caption2).foregroundStyle(.secondary)
         if !data.activeIntervals.isEmpty {
             Text("옅은 띠 = 교체 기록으로 확인된 이 계정의 활성 구간")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -524,21 +551,64 @@ struct AccountUsageChart: View {
             .padding(.top, 4)
         }
     }
+}
 
-    private var selectedPoint: AccountUsageData.UsagePoint? {
-        guard let selected else { return nil }
-        return data.usageSample(near: selected) ?? data.usageSample(near: selected, window: .fiveHour)
+/// 계정 사용률 호버 줄 — 호버 값만 관찰한다.
+private struct AccountUsageHoverLine: View {
+    let timeZone: TimeZone
+    @ObservedObject var hover: ChartHoverState<AccountUsageData.Hover>
+
+    var body: some View {
+        ChartHoverLine(text: hover.value.map { ChartFormat.usageHover($0, timeZone: timeZone) })
+    }
+}
+
+/// 계정 사용률 그래프 위 호버 층: 마우스 위치 → 호버 값, 선택 세로선·점 표시.
+private struct AccountUsageHoverLayer: View {
+    let data: AccountUsageData
+    let proxy: ChartProxy
+    /// 그래프 영역 (이 층의 좌표계).
+    let plot: CGRect
+    @ObservedObject var hover: ChartHoverState<AccountUsageData.Hover>
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let at):
+                        guard at.x >= plot.minX, at.x <= plot.maxX,
+                              let date = proxy.value(atX: at.x - plot.minX, as: Date.self)
+                        else { return hover.set(nil) }
+                        hover.set(data.hover(at: date))
+                    case .ended:
+                        hover.set(nil)
+                    }
+                }
+            if let h = hover.value {
+                marker(h).allowsHitTesting(false)
+            }
+        }
     }
 
-    private var hoverText: String? {
-        guard let p = selectedPoint else { return nil }
-        var parts = [ChartFormat.timeLabel(p.ts, timeZone: data.timeZone)]
-        let seven = data.usage.first { $0.window == .sevenDay && $0.ts == p.ts }
-        let five = data.usage.first { $0.window == .fiveHour && $0.ts == p.ts }
-        if let seven { parts.append("7d \(ChartFormat.percent(seven.percent))") }
-        if let five { parts.append("5h \(ChartFormat.percent(five.percent))") }
-        if data.activeIntervals.contains(where: { $0.contains(p.ts) }) { parts.append("활성") }
-        return parts.joined(separator: " · ")
+    @ViewBuilder
+    private func marker(_ h: AccountUsageData.Hover) -> some View {
+        if let x = proxy.position(forX: h.anchor) {
+            Path { p in
+                p.move(to: CGPoint(x: plot.minX + x, y: plot.minY))
+                p.addLine(to: CGPoint(x: plot.minX + x, y: plot.maxY))
+            }
+            .stroke(Color.secondary.opacity(0.5), lineWidth: 1)
+        }
+        ForEach(h.points) { p in
+            if let x = proxy.position(forX: p.ts), let y = proxy.position(forY: p.percent) {
+                Circle()
+                    .fill(Color.primary)
+                    .frame(width: 8, height: 8)
+                    .position(x: plot.minX + x, y: plot.minY + y)
+            }
+        }
     }
 }
 
