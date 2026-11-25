@@ -97,6 +97,7 @@ rm -rf /tmp/cx
 | `usagebar add-codex <auth.json \| ->` | Codex 계정 추가 |
 | `usagebar remove <uuid-prefix>` | 계정 제거 |
 | `usagebar roll [--to <email>] [--dry-run]` | Claude Code 키체인 로그인 교체 |
+| `usagebar stats [--days N] [--json] [--refresh]` | 이 맥 사용량 장부 — 일별·모델별 토큰과 API 환산 비용 ([사용량 장부](#사용량-장부-이-맥-전체-토큰--api-환산-비용)) |
 
 ## 데이터 위치
 
@@ -112,11 +113,92 @@ rm -rf /tmp/cx
   - `roll-history.jsonl` — 키체인 로그인 교체 기록. 교체가 확정(키체인 재검증 통과)된
     뒤에만 `{"v":1,"ts":<ms>,"from":<이메일|null>,"to":<이메일>,"reason":…}` 1줄.
     자동 롤링·팝오버 전환·`usagebar roll` 모두 기록되고 `--dry-run`·실패·원복은 기록되지 않는다. 400일 보존.
+  - `ledger.sqlite` — 이 맥 사용량 장부(SQLite WAL): 로컬 날짜×모델별 토큰 합계, 집계 시작 시각,
+    세션 기록 파일별 읽은 위치, 중복 제거 키. 400일 보존. 아래 「사용량 장부」 절.
+  - `prices.json` — LiteLLM 단가표의 Claude 부분 캐시(하루 1회 갱신).
 - 폴링: 계정별 독립 스케줄 — 사용량과 무관하게 평탄한 3분 주기.
   오버라이드: `pollIntervalSeconds`(기본 180) defaults 키
 
 Keychain 마이그레이션은 서명된 .app 배포 시점에 예정 (ad-hoc 빌드는 서명이 매번 바뀌어
 Keychain ACL 프롬프트가 빌드마다 뜨기 때문에 v0.1은 파일 저장 채택).
+
+## 사용량 장부 (이 맥 전체 토큰 · API 환산 비용)
+
+이 맥에서 claude로 토큰을 얼마나, 어떤 모델로 썼고 API 정가로 치면 얼마어치인지를 일 단위로
+쌓는다. **계정 구분 없이 이 맥 전체 합계**다 — 어느 응답이 어느 계정으로 나갔는지는 세션 기록에
+없어서, 정하려 들면 키체인 교체 경계에서 엉뚱한 계정에 붙는다. 계정별로는 서버가 준 사용률
+(5h·7d, 위 `usage-history.jsonl`)만 본다. ccusage(오픈소스)와 같은 원천·단가표·중복 제거 키를 쓴다.
+
+**원천:** Claude Code가 남기는 세션 기록 `~/.claude/projects/<cwd>/<세션 id>.jsonl`과 서브에이전트
+기록 `…/<세션 id>/subagents/agent-*.jsonl`. 어떤 경로로 실행된 claude든(터미널·OpenClaw·스크립트)
+모두 여기 남으므로 전부 센다. 기록 파일은 읽기만 한다(수정·삭제 없음).
+
+- 대상 줄: `type == "assistant"`이고 `message.usage`가 있는 줄. 모델 `<synthetic>`(claude가 API
+  호출 없이 남기는 오류 자리표시)은 뺀다.
+- **중복 제거:** 한 응답이 콘텐츠 블록마다 같은 usage로 여러 줄 기록되므로 `message.id` +
+  `requestId`(둘 중 하나가 없으면 `uuid`)가 같은 줄은 한 번만 센다.
+- 토큰 6구분: 입력(`input_tokens`), 출력(`output_tokens`), 캐시 쓰기 5분
+  (`cache_creation.ephemeral_5m_input_tokens`), 캐시 쓰기 1시간(`ephemeral_1h_input_tokens`),
+  캐시 읽기(`cache_read_input_tokens`), 웹 검색 횟수(`server_tool_use.web_search_requests`).
+  `cache_creation` 내역 없이 `cache_creation_input_tokens`만 있으면 5분으로 본다.
+- 날짜는 맥 시간대의 로컬 날짜(자정 경계)다.
+
+**집계 시작 이후만:** 장부를 처음 열어 집계한 순간(이 기능이 든 앱이 처음 돈 시각)을 집계 시작
+시각으로 장부에 한 번 저장하고 이후 바꾸지 않는다. 그보다 이른 메시지는 버리고, 마지막 수정
+시각이 그보다 이른 기록 파일은 열지도 않는다 — **기존 기록은 넣지 않는다**(백필 없음). 집계 시작
+때 열려 있던 세션도 그 뒤에 쓴 줄부터 센다. 또 90일 넘은 메시지는 받지 않는다(중복 제거 키를
+90일 보관하므로).
+
+**증분 집계:** 앱이 1분마다(폴러 틱, 백그라운드 큐 — 메인 스레드를 막지 않음) 파일별 (inode, 읽은
+바이트 오프셋)부터 새로 붙은 완결 줄만 읽는다. 개행 없는 마지막 줄은 다음 주기로 미룬다. inode가
+바뀌었거나 파일이 줄었으면 처음부터 다시 읽되 중복 제거 키로 이중 집계를 막는다. 집계 창 밖
+시각의 줄은 JSON 파싱 없이 건너뛴다. 한 번의 집계(오프셋·중복 제거 키·합계)는 SQLite 트랜잭션
+하나라 도중에 죽어도 누락·이중 집계가 없고, 앱을 다시 켜면 이어서 집계한다.
+
+**API 환산 비용:** 같은 토큰을 Anthropic API 정가로 계산한 값 — 구독 청구액이 아니다(어디서나
+이 이름으로 표기). 단가는 [LiteLLM 단가표](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json)
+(ccusage가 쓰는 원본).
+
+- 모델 대조: 정확 일치 → 날짜 접미사 제거(`-20251001` 등) → `anthropic/` 접두.
+- 비용 = 입력×`input_cost_per_token` + 출력×`output_cost_per_token` + 5분 캐시×
+  `cache_creation_input_token_cost` + 1시간 캐시×`cache_creation_input_token_cost_above_1hr`
+  (없으면 5분 단가) + 캐시 읽기×`cache_read_input_token_cost` + 웹 검색×
+  `search_context_cost_per_query.search_context_size_medium`(없으면 0). 그 뒤 `usage.speed ==
+  "fast"`면 `provider_specific_entry.fast`, `usage.inference_geo == "us"`면
+  `provider_specific_entry.us` 배수를 곱한다(항목에 있을 때만).
+- **장문 구간 할증:** 항목에 `<기본 필드>_above_<N>k_tokens` 키가 있으면(예: `claude-haiku-5-5`의
+  `*_above_100k_tokens`) **요청 하나**의 프롬프트 합(`input_tokens` + `cache_creation_input_tokens`
+  (5분+1시간) + `cache_read_input_tokens`)이 기준 N×1000을 **넘을 때**(`>`, 정확히 100,000은 기본)
+  그 요청의 **모든 토큰 구분 — 출력까지 — 을 할증 단가**로 계산한다. 기준 초과분만 할증하는
+  방식(ccusage)이 아니다. 근거(2026-11-19 실측, claude 2.1.293): haiku-5-5 입력 2 / 출력 4 /
+  캐시 읽기 13,049 / 1시간 캐시 329,604(프롬프트 342,655) = 2×5e-7 + 4×2.5e-6 + 13,049×5e-8 +
+  329,604×1e-6 = **$0.33026745** = CLI `costUSD`(기본 단가로는 약 $0.07). 62,834 프롬프트 요청은
+  기본 단가 그대로 $0.0105774. 기준이 여러 개면 넘은 것 중 가장 큰 기준 하나를 쓰고, 할증 단가가
+  빠진 구분은 기본 단가를 쓴다(1시간 캐시는 할증 1시간 → 할증 5분 → 기본 1시간 → 기본 5분).
+  fast·us 배수는 할증 단가에 곱한다. `*_batches`(배치 API) 키는 쓰지 않는다.
+- **판정 시점:** 장문 여부는 **집계할 때** 그때의 단가표 기준으로 응답마다 판정해 장부에 구간
+  (`tier` = 기준 토큰 수, 0 = 기본)으로 따로 저장한다 — 하루치를 합친 뒤에는 어느 요청이 기준을
+  넘었는지 알 수 없기 때문이다. 단가표의 기준이 나중에 바뀌어도 **과거 판정은 다시 하지 않는다**
+  (단가 금액은 표시 시점의 표를 따른다. 저장된 기준이 표에서 사라졌으면 그 이하의 가장 큰 기준,
+  없으면 기본 단가). 단가표에 없던 모델의 응답은 기본 구간으로 저장된다. `usagebar stats`는
+  구간을 합쳐 보이고 장문 응답 수·토큰을 한 줄로, `--json`은 `longContextTokens`·
+  `longContextMessages`로 따로 준다.
+- 검증: haiku-4-5 응답 1건(입력 10 / 출력 891 / 캐시 읽기 17,957 / 1시간 캐시 44,247) =
+  $0.0947547 = CLI `modelUsage.claude-haiku-4-5.costUSD`(단위 테스트로 고정).
+- 단가를 못 찾은 모델(또는 캐시 단가 없이 캐시 토큰이 있는 경우)은 토큰만 집계하고 「단가 미상」
+  으로 표시한다 — $0으로 위장하지 않으며, 합계는 「$X + 단가 미상」이 된다.
+- 비용은 장부에 저장하지 않고 **표시할 때** 토큰 × 현재 단가로 계산한다(단가표가 갱신되면 과거
+  비용도 같은 표로 다시 계산 — fast/us 응답과 장문 구간 응답은 장부에서 따로 칸을 둬 배수·할증을
+  나중에도 적용한다).
+- 단가표 원천: 앱이 하루 1회 원격 표를 받아 Claude 항목만 추려 `claude/prices.json`에 캐시한다.
+  실패(네트워크·HTTP·파싱·Claude 항목 없음)하면 기존 캐시 → 앱에 컴파일된 번들 사본 순으로 쓰고
+  6시간 뒤 다시 시도한다. 번들 사본은 `Sources/UsageBar/BundledPrices.swift`(출처 URL·받은 날짜
+  기록) — `swift scripts/update-bundled-prices.swift [litellm.json]`로 다시 만든다.
+
+**조회:** `usagebar stats [--days N] [--json] [--refresh]` — 일별·모델별 토큰과 API 환산 비용,
+집계 시작 시각(기본 최근 7일, `--days`는 1~400). GUI 없이 장부 파일만 읽고 네트워크를 쓰지
+않는다(단가는 캐시/번들). `--refresh`는 앱과 같은 집계를 1회 실행한다(앱과 동시에 돌아도
+SQLite 쓰기 잠금으로 차례로 실행). 계정 구분이 없으므로 `--account`는 없다.
 
 ## API 레퍼런스 (실측 기준)
 

@@ -7,10 +7,11 @@ import Foundation
 ///   usagebar add-claude --from-local-cli — piggyback on local Claude Code login
 ///   usagebar add-codex <auth.json path | -> — import a codex auth.json
 ///   usagebar remove <uuid-prefix>      — remove an account
+///   usagebar stats [--days N] …        — Mac-wide usage ledger (tokens + API 환산 비용)
 enum CLI {
     static func shouldRun(_ args: [String]) -> Bool {
         guard args.count > 1 else { return false }
-        return ["check", "list", "add-claude", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "parse-codex", "help", "--help"]
+        return ["check", "list", "add-claude", "add-codex", "remove", "roll", "priority", "update", "webhook", "notify", "parse-codex", "stats", "help", "--help"]
             .contains(args[1])
     }
 
@@ -197,6 +198,9 @@ enum CLI {
             let ok = proc.terminationStatus == 0
             print(ok ? "완료 — 앱이 재시작됨" : "실패 — 로그 확인: tail /tmp/usagebar-update.log")
             return ok ? 0 : 1
+
+        case "stats":
+            return StatsCommand.run(args)
 
         case "parse-codex":
             // wham/usage 응답 JSON(stdin)을 실제 파서에 통과시켜 창 배치를 확인.
@@ -388,6 +392,7 @@ enum CLI {
           usagebar priority <email|uuid접두어> <1-9>  롤링 우선순위 (낮을수록 우선)
           usagebar update          깃허브 pull → 재빌드 → 재설치 → 재시작
           usagebar webhook slack|discord <url> | clear | show | test
+          usagebar stats [--days N] [--json] [--refresh]   이 맥의 일별·모델별 토큰과 API 환산 비용
           usagebar parse-codex     wham/usage JSON(stdin) 파싱 결과 확인 (디버그)
     """
 }

@@ -38,6 +38,8 @@ final class Poller: ObservableObject {
             // 15s tick; each account fires when its own due time passes.
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
+                // 사용량 장부: 세션 기록 증분 집계(백그라운드, 1분 이내 주기).
+                LedgerScanner.shared.scanIfDue()
                 await self?.refreshDue()
             }
         }
